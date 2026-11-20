@@ -1381,8 +1381,6 @@
     <span class="swatch" style="background:linear-gradient(135deg,#3d1c66,#c9427c,#ffd94a);"></span>
   </label>
   <p class="hint">专题图层为 2025-01-15（南半球盛夏）合成，半透明叠加在底图上</p>
-
-  <p class="hint">拖动平移 · 滚轮缩放 · 悬停读取坐标</p>
 </aside>
 
 <aside id="vecpanel" class="corner">
@@ -2233,7 +2231,16 @@
     var li = e.target.closest('li');
     if (!li || !li.dataset.name) return;
     var f = stationByName[li.dataset.name];
-    if (f) { selectFeature(f); openStationCard(f); }
+    if (!f) return;
+    selectFeature(f);
+    openStationCard(f);
+    // 定位：视图动画平移到站点，若当前较粗则同时放大一档近距离分辨率
+    var coord = f.getGeometry().getCoordinates();
+    view.animate({
+      center: coord,
+      resolution: Math.min(view.getResolution(), 512),
+      duration: 900
+    });
   });
 
   function downloadFile(name, text, mime) {
