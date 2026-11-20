@@ -144,14 +144,40 @@
     top: 50%;
     transform: translate(-50%, -50%);
     font-family: var(--serif);
-    font-size: 17px;
-    font-weight: 600;
-    letter-spacing: 0.26em;
-    color: var(--text);
+    font-size: 21px;
+    font-weight: 700;
+    letter-spacing: 0.3em;
+    margin-right: -0.3em;
+    color: #f4fbff;
     white-space: nowrap;
-    text-shadow: 0 0 20px rgba(79, 216, 232, 0.3);
+    text-shadow: 0 0 22px rgba(79, 216, 232, 0.4);
   }
-  #topbar .tb-title b { color: var(--accent); font-weight: 600; }
+  /* 「科考」二字：冰川青渐变，与全屏冷色辉光呼应 */
+  #topbar .tb-title b {
+    font-weight: 700;
+    background: linear-gradient(180deg, #aef1ff 0%, #4fd8e8 58%, #2aa8c9 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 0 10px rgba(79, 216, 232, 0.45));
+  }
+  /* 标题两侧渐隐饰线：雷达刻度的余韵 */
+  #topbar .tb-title::before,
+  #topbar .tb-title::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    width: 72px;
+    height: 1px;
+  }
+  #topbar .tb-title::before {
+    right: calc(100% + 18px);
+    background: linear-gradient(270deg, rgba(79, 216, 232, 0.85), rgba(79, 216, 232, 0));
+  }
+  #topbar .tb-title::after {
+    left: calc(100% + 18px);
+    background: linear-gradient(90deg, rgba(79, 216, 232, 0.85), rgba(79, 216, 232, 0));
+  }
   #topbar .tb-spacer { flex: 1; }
   #topbar .tb-item {
     display: flex;
@@ -489,6 +515,10 @@
     transition: background 0.12s;
   }
   .sl-body li:hover { background: rgba(79, 216, 232, 0.1); }
+  .sl-body li.active {
+    background: rgba(79, 216, 232, 0.14);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
   .sl-body .nm {
     flex: 0 1 auto;
     font-size: 12.5px;
@@ -1167,7 +1197,8 @@
   @media (max-width: 720px) {
     #topbar { gap: 10px; padding: 0 12px; }
     #topbar .tb-sep, #topbar .tb-item:not(.tb-clock) { display: none; }
-    #topbar .tb-title { font-size: 13px; letter-spacing: 0.14em; }
+    #topbar .tb-title { font-size: 15px; letter-spacing: 0.18em; margin-right: -0.18em; }
+    #topbar .tb-title::before, #topbar .tb-title::after { display: none; }
     #panel {
       width: calc(100% - 20px);
       left: 10px; top: 54px; right: 10px;
@@ -2081,6 +2112,12 @@
     if (evt.dragging) return;
     moveCoord = evt.coordinate;
     if (!moveRaf) moveRaf = requestAnimationFrame(paintReadout);
+    // 悬停科考站给出可点击暗示：光标变为指针
+    var hitStation = map.hasFeatureAtPixel(evt.pixel, {
+      layerFilter: function (l) { return l === stationLayer; },
+      hitTolerance: 5
+    });
+    map.getTargetElement().style.cursor = hitStation ? 'pointer' : '';
   });
 
   map.on('moveend', function () {
@@ -2180,8 +2217,18 @@
     });
     listBody.innerHTML = html || '<li class="meta" style="cursor:default;color:#7fa8c9">无匹配站点</li>';
     listCount.textContent = shown + ' / ' + STATIONS.length;
+    syncListSelection();
   }
   renderStationList('');
+
+  // 选中站点与列表行联动：地图点选 / 详情卡关闭时同步高亮列表
+  function syncListSelection() {
+    var selName = selectedFeature ? selectedFeature.get('name') : null;
+    var rows = listBody.querySelectorAll('li[data-name]');
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].classList.toggle('active', rows[i].dataset.name === selName);
+    }
+  }
 
   function toggleStationList(force) {
     var open = (typeof force === 'boolean') ? force : stListEl.hidden;
@@ -2207,6 +2254,8 @@
     if (!li || !li.dataset.name) return;
     var f = stationByName[li.dataset.name];
     if (!f) return;
+    // 选中即定位：收起列表让视野交给地图与详情卡
+    toggleStationList(false);
     selectFeature(f);
     openStationCard(f);
     // 定位：视图动画平移到站点，若当前较粗则同时放大一档近距离分辨率
@@ -2216,6 +2265,17 @@
       resolution: Math.min(view.getResolution(), 512),
       duration: 900
     });
+  });
+
+  // ESC 一步清场：关闭列表 / 矢量面板 / 详情卡 / 弹窗并取消选中
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    toggleStationList(false);
+    vecPanelEl.classList.remove('open');
+    document.getElementById('vec-fab').classList.remove('active');
+    closeStationCard();
+    closePopup();
+    selectFeature(null);
   });
 
   function downloadFile(name, text, mime) {
@@ -2986,6 +3046,7 @@
   document.getElementById('sc-close').addEventListener('click', function () {
     closeStationCard();
     selectFeature(null);
+    syncListSelection();
   });
 
   map.on('singleclick', function (evt) {
@@ -3004,8 +3065,9 @@
       return false;
     }, { hitTolerance: 5 });
 
-    if (!hit) { closePopup(); closeStationCard(); selectFeature(null); return; }
+    if (!hit) { closePopup(); closeStationCard(); selectFeature(null); syncListSelection(); return; }
     selectFeature(hit.f);
+    syncListSelection();
 
     if (hit.station) {                    // 考察站 → 右侧详情卡
       closePopup();
