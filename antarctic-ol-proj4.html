@@ -1,0 +1,3050 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>南极态势感知系统</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="https://unpkg.com/ol@10.4.0/ol.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500&family=Noto+Serif+SC:wght@600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #04090f;
+    --bg-2: #071522;
+    --panel: rgba(7, 18, 30, 0.88);
+    --line: #17304a;
+    --line-strong: #24486b;
+    --text: #d9e8f5;
+    --muted: #8fb0cb;
+    --accent: #4fd8e8;
+    --accent-dim: rgba(79, 216, 232, 0.38);
+    --warm: #ffb454;
+    --mono: "IBM Plex Mono", ui-monospace, Consolas, "Courier New", monospace;
+    --serif: "Noto Serif SC", "Songti SC", SimSun, serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); }
+  ::selection { background: rgba(79, 216, 232, 0.28); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  body {
+    font-family: "Noto Sans SC", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    color: var(--text);
+    overflow: hidden;
+  }
+  /* 极夜氛围：极光冷辉 + 网格坐标纸 + 扫描线颗粒，指挥舱底色 */
+  body::before {
+    content: "";
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(1100px 620px at 50% 42%, rgba(46, 118, 158, 0.16) 0%, transparent 62%),
+      radial-gradient(900px 500px at 12% -6%, rgba(79, 216, 232, 0.07) 0%, transparent 60%),
+      linear-gradient(rgba(79, 216, 232, 0.028) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(79, 216, 232, 0.028) 1px, transparent 1px),
+      linear-gradient(180deg, #061220 0%, #04090f 55%, #02060b 100%);
+    background-size: auto, auto, 44px 44px, 44px 44px, auto;
+    pointer-events: none;
+    z-index: 0;
+  }
+  body::after {
+    content: "";
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.13) 0 1px, transparent 1px 3px);
+    mix-blend-mode: overlay;
+    pointer-events: none;
+    z-index: 1;
+  }
+  #map { position: absolute; inset: 0; background: var(--bg); }
+  /* 圆形版式：clip-path 挂在画布上，坐标由 JS 写入的变量给出 */
+  #map canvas {
+    clip-path: circle(var(--clip-r, 200vmax) at var(--clip-cx, 50%) var(--clip-cy, 50%));
+  }
+  #ring {
+    position: absolute;
+    display: none;
+    pointer-events: none;
+    border: 1px solid rgba(79, 216, 232, 0.55);
+    border-radius: 50%;
+    /* 冰川青光环：把影像圆盘从极夜底色中「点亮」出来 */
+    box-shadow: 0 0 0 5px rgba(79, 216, 232, 0.14),
+                0 0 44px rgba(79, 216, 232, 0.3),
+                inset 0 0 30px rgba(4, 9, 15, 0.5);
+    z-index: 3;
+    animation: ringIn 1.1s cubic-bezier(0.2, 0.7, 0.2, 1) 0.25s both;
+  }
+  /* 外圈虚线刻度环 —— 雷达刻度 */
+  #ring::after {
+    content: "";
+    position: absolute; inset: -9px;
+    border: 1px dashed rgba(79, 216, 232, 0.3);
+    border-radius: 50%;
+  }
+  /* 缓慢扫掠的雷达光束：大屏「监测中」的呼吸感 */
+  #ring::before {
+    content: "";
+    position: absolute; inset: 1px;
+    border-radius: 50%;
+    background: conic-gradient(
+      from 0deg,
+      rgba(79, 216, 232, 0.16) 0deg,
+      rgba(79, 216, 232, 0.05) 55deg,
+      transparent 90deg,
+      transparent 360deg);
+    animation: sweep 14s linear infinite;
+    pointer-events: none;
+  }
+  @keyframes sweep {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #ring::before { animation: none; opacity: 0; }
+  }
+  @keyframes ringIn {
+    from { opacity: 0; transform: scale(0.965); }
+    to   { opacity: 1; transform: scale(1); }
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ---------- 顶部指挥条 ---------- */
+  #topbar {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 48px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 20px;
+    background: linear-gradient(180deg, rgba(7, 20, 34, 0.97), rgba(7, 20, 34, 0.8));
+    border-bottom: 1px solid var(--line);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+    z-index: 12;
+    animation: rise 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  }
+  /* 顶栏底缘的冰川青渐变饰线 */
+  #topbar::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; bottom: -1px;
+    height: 1px;
+    background: linear-gradient(90deg,
+      transparent 0%,
+      rgba(79, 216, 232, 0.55) 18%,
+      rgba(79, 216, 232, 0.14) 55%,
+      transparent 100%);
+    pointer-events: none;
+  }
+  #topbar .tb-title {
+    font-family: var(--serif);
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: 0.26em;
+    color: var(--text);
+    white-space: nowrap;
+    text-shadow: 0 0 20px rgba(79, 216, 232, 0.3);
+  }
+  #topbar .tb-title b { color: var(--accent); font-weight: 600; }
+  #topbar .tb-sub {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  #topbar .tb-spacer { flex: 1; }
+  #topbar .tb-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  #topbar .tb-item .v { color: var(--text); }
+  /* GitHub 源码入口 */
+  .tb-gh {
+    display: flex;
+    align-items: center;
+    color: var(--muted);
+    transition: color 0.15s, filter 0.15s;
+  }
+  .tb-gh:hover {
+    color: var(--accent);
+    filter: drop-shadow(0 0 6px rgba(79, 216, 232, 0.55));
+  }
+  #topbar .tb-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px rgba(79, 216, 232, 0.8);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  #topbar .tb-sep { width: 1px; height: 16px; background: var(--line); }
+
+  /* ---------- 控制面板 ---------- */
+  #panel, #vecpanel {
+    position: absolute;
+    width: 274px;
+    overflow-y: auto;
+    padding: 18px 18px 15px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(79, 216, 232, 0.08);
+    z-index: 10;
+  }
+  /* 海图角标：对角 L 形刻线 */
+  #panel::before, #panel::after,
+  #vecpanel::before, #vecpanel::after,
+  #station-card::before, #station-card::after {
+    content: "";
+    position: absolute;
+    width: 14px; height: 14px;
+    pointer-events: none;
+  }
+  #panel::before, #vecpanel::before, #station-card::before {
+    top: -1px; left: -1px;
+    border-top: 1px solid var(--accent);
+    border-left: 1px solid var(--accent);
+    opacity: 0.75;
+  }
+  #panel::after, #vecpanel::after, #station-card::after {
+    bottom: -1px; right: -1px;
+    border-bottom: 1px solid var(--accent);
+    border-right: 1px solid var(--accent);
+    opacity: 0.75;
+  }
+  /* 左面板底部留出缩放控件（bottom 58–121px）的空间，避免盖住「+」按钮 */
+  #panel { top: 60px; left: 16px; max-height: calc(100% - 196px); animation: rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) 0.05s both; }
+  /* 右侧：矢量面板悬浮在地图上（点图标出现），位于统计卡左侧一列 */
+  #vecpanel { top: 60px; right: 358px; max-height: calc(100% - 252px); display: none; animation: rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) 0.2s both; }
+  #vecpanel.open { display: block; }
+
+  /* ---------- 右侧悬浮图标（矢量入口 + 重置视图，纵排一列） ---------- */
+  #vec-fab, #reset-view {
+    position: absolute;
+    right: 312px;
+    width: 36px; height: 36px;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+    background: var(--panel);
+    border: 1px solid var(--accent-dim);
+    border-radius: 4px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(79, 216, 232, 0.1);
+    cursor: pointer;
+    z-index: 11;
+  }
+  #vec-fab { top: 60px; }
+  #reset-view { top: 106px; }
+  #vec-fab::before, #vec-fab::after {
+    content: "";
+    position: absolute;
+    width: 10px; height: 10px;
+    pointer-events: none;
+  }
+  #vec-fab::before {
+    top: -1px; left: -1px;
+    border-top: 1px solid var(--accent);
+    border-left: 1px solid var(--accent);
+  }
+  #vec-fab::after {
+    bottom: -1px; right: -1px;
+    border-bottom: 1px solid var(--accent);
+    border-right: 1px solid var(--accent);
+  }
+  #vec-fab:hover {
+    background: rgba(79, 216, 232, 0.12);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45), 0 0 16px rgba(79, 216, 232, 0.25);
+  }
+  #vec-fab.active {
+    background: rgba(79, 216, 232, 0.16);
+    border-color: var(--accent);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45), 0 0 18px rgba(79, 216, 232, 0.3);
+  }
+
+  /* ---------- 数据统计卡（右侧常驻，顶格贴顶栏） ---------- */
+  #stats {
+    position: absolute;
+    top: 60px; right: 16px;
+    width: 286px;
+    max-height: calc(100% - 252px);
+    overflow-y: auto;
+    padding: 15px 16px 13px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(79, 216, 232, 0.08);
+    z-index: 10;
+  }
+  #stats::before, #stats::after {
+    content: "";
+    position: absolute;
+    width: 14px; height: 14px;
+    pointer-events: none;
+  }
+  #stats::before {
+    top: -1px; left: -1px;
+    border-top: 1px solid var(--accent);
+    border-left: 1px solid var(--accent);
+    opacity: 0.75;
+  }
+  #stats::after {
+    bottom: -1px; right: -1px;
+    border-bottom: 1px solid var(--accent);
+    border-right: 1px solid var(--accent);
+    opacity: 0.75;
+  }
+  .st-title {
+    margin: 0 0 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #1d3a5c;
+    font-family: var(--serif);
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: 0.2em;
+    color: var(--text);
+    text-shadow: 0 0 14px rgba(79, 216, 232, 0.25);
+  }
+  .st-sec {
+    margin: 13px 0 6px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.16em;
+    color: var(--accent);
+  }
+  .st-sec::before { content: "// "; color: var(--accent-dim); }
+  .st-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 5.5px 0;
+    font-size: 14px;
+  }
+  .st-row .k { flex: 0 0 auto; font-size: 13.5px; color: #7fa8c9; }
+  .st-row .v {
+    color: #e3f0fa;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .st-row .v.hl { color: var(--warm); }
+  .st-sec-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  #st-list-btn {
+    margin: 0;
+    padding: 1px 8px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+    background: rgba(79, 216, 232, 0.08);
+    border: 1px solid var(--accent-dim);
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.15s, box-shadow 0.15s;
+  }
+  #st-list-btn:hover {
+    background: rgba(79, 216, 232, 0.18);
+    box-shadow: 0 0 10px rgba(79, 216, 232, 0.25);
+  }
+
+  /* ---------- 全部科考站列表卡（悬浮于统计卡左侧） ---------- */
+  #station-list {
+    position: absolute;
+    top: 60px; right: 358px;
+    width: 300px;
+    max-height: calc(100% - 252px);
+    display: flex;
+    flex-direction: column;
+    padding: 14px 14px 12px;
+    /* 此卡悬浮在明亮影像之上：不用 backdrop-filter，用更实的底色保证可读（同统计卡的合成兼容处理） */
+    background: rgba(9, 22, 38, 0.94);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(79, 216, 232, 0.08);
+    z-index: 11;
+  }
+  #station-list[hidden] { display: none; }
+  #station-list::before, #station-list::after {
+    content: "";
+    position: absolute;
+    width: 14px; height: 14px;
+    pointer-events: none;
+  }
+  #station-list::before {
+    top: -1px; left: -1px;
+    border-top: 1px solid var(--accent);
+    border-left: 1px solid var(--accent);
+    opacity: 0.75;
+  }
+  #station-list::after {
+    bottom: -1px; right: -1px;
+    border-bottom: 1px solid var(--accent);
+    border-right: 1px solid var(--accent);
+    opacity: 0.75;
+  }
+  .sl-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    padding-bottom: 7px;
+    border-bottom: 1px solid #1d3a5c;
+  }
+  .sl-title {
+    margin: 0;
+    font-family: var(--serif);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    color: var(--text);
+    text-shadow: 0 0 14px rgba(79, 216, 232, 0.25);
+  }
+  .sl-count {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 0.05em;
+  }
+  .sl-close {
+    width: 22px; height: 22px;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .sl-close:hover { color: var(--text); border-color: var(--accent-dim); }
+  .sl-tools {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  #sl-search {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 8px;
+    font-size: 12px;
+    color: var(--text);
+    background: rgba(4, 12, 22, 0.6);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    outline: none;
+  }
+  #sl-search:focus { border-color: var(--accent-dim); }
+  .sl-tools button {
+    margin: 0;
+    padding: 4px 9px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+    background: rgba(79, 216, 232, 0.08);
+    border: 1px solid var(--accent-dim);
+    border-radius: 3px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s, box-shadow 0.15s;
+  }
+  .sl-tools button:hover {
+    background: rgba(79, 216, 232, 0.18);
+    box-shadow: 0 0 10px rgba(79, 216, 232, 0.25);
+  }
+  .sl-body {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    flex: 1 1 auto;
+    min-height: 0;          /* 关键：flex 子项允许收缩，使列表在卡片内部滚动而非溢出深色背景 */
+    overflow-y: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .sl-body::-webkit-scrollbar { display: none; }
+  .sl-body li {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.12s;
+  }
+  .sl-body li:hover { background: rgba(79, 216, 232, 0.1); }
+  .sl-body .nm {
+    flex: 0 1 auto;
+    font-size: 12.5px;
+    color: #d9e8f5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .sl-body li.cn .nm {
+    color: var(--warm);
+    text-shadow: 0 0 8px rgba(255, 122, 61, 0.35);
+  }
+  .sl-body .meta {
+    flex: 0 0 auto;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: #7fa8c9;
+    letter-spacing: 0.02em;
+  }
+  /* 滚动条全部隐藏：内容仍可用滚轮滚动，界面保持无滚动条的干净大屏感 */
+  #panel, #vecpanel, #popup, #legend, #station-card, #stats {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  #panel::-webkit-scrollbar, #vecpanel::-webkit-scrollbar,
+  #popup::-webkit-scrollbar, #legend::-webkit-scrollbar,
+  #station-card::-webkit-scrollbar, #stats::-webkit-scrollbar { display: none; }
+
+  #panel h1 {
+    margin: 0;
+    font-family: var(--serif);
+    font-size: 23px;
+    font-weight: 600;
+    letter-spacing: 0.2em;
+    color: var(--text);
+    text-shadow: 0 0 22px rgba(79, 216, 232, 0.3);
+  }
+  #panel h1::after {
+    content: "";
+    display: block;
+    width: 34px; height: 2px;
+    margin-top: 7px;
+    background: linear-gradient(90deg, var(--accent), transparent);
+  }
+  #panel .sub {
+    margin: 8px 0 0;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    color: var(--muted);
+    letter-spacing: 0.14em;
+    font-variant-numeric: tabular-nums;
+  }
+  .hr { height: 1px; background: var(--line); margin: 12px 0; }
+
+  .grp-title {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    color: #e8f3fc;
+    margin: 0 0 8px;
+    text-transform: uppercase;
+  }
+
+  .vp-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .vp-head h2 {
+    position: relative;
+    margin: 0;
+    padding-bottom: 7px;
+    font-family: var(--serif);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    color: var(--text);
+  }
+  .vp-head h2::after {
+    content: "";
+    position: absolute;
+    left: 0; bottom: 0;
+    width: 26px; height: 2px;
+    background: linear-gradient(90deg, var(--accent), transparent);
+  }
+  #vec-toggle {
+    width: 22px; height: 22px;
+    margin: 0; padding: 0;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1;
+    color: var(--muted);
+    background: none;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  #vec-toggle:hover { color: var(--accent); border-color: var(--accent-dim); }
+  #vecpanel.collapsed .vp-body { display: none; }
+
+  label.row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 0;
+    font-size: 13px;
+    cursor: pointer;
+    color: #f2f8fd;
+    user-select: none;
+    transition: color 0.15s;
+  }
+  label.row:hover { color: var(--accent); }
+  .lyr-txt {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    line-height: 1.3;
+  }
+  .lyr-sub {
+    font-size: 10.5px;
+    letter-spacing: 0.02em;
+    color: #c9dcec;
+    margin-top: 2px;
+  }
+  label.row input[type="checkbox"] {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 14px; height: 14px;
+    margin: 0;
+    border: 1px solid #35608c;
+    border-radius: 3px;
+    background: rgba(10, 24, 40, 0.9);
+    flex: 0 0 auto;
+    position: relative;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+  }
+  label.row input[type="checkbox"]:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+    box-shadow: 0 0 8px rgba(79, 216, 232, 0.45);
+  }
+  label.row input[type="checkbox"]:checked::after {
+    content: "";
+    position: absolute;
+    left: 4px; top: 1px;
+    width: 4px; height: 8px;
+    border: solid #04121e;
+    border-width: 0 2px 2px 0;
+    transform: rotate(42deg);
+  }
+
+  .swatch {
+    width: 10px; height: 10px;
+    border-radius: 3px;
+    flex: 0 0 auto;
+    margin-left: auto;
+    box-shadow: 0 0 0 1px rgba(207, 226, 240, 0.18);
+  }
+  .sw-vel { background: linear-gradient(135deg, #2b6ef2, #2fd7c4, #ffd23f, #ff6a2b); }
+  .sw-circle, .sw-grat { width: 16px; height: 2px; border-radius: 1px; align-self: center; }
+  .sw-circle { background: repeating-linear-gradient(90deg, #4fd8e8 0 4px, transparent 4px 8px); }
+  .sw-grat { background: repeating-linear-gradient(90deg, rgba(79,216,232,.6) 0 2px, transparent 2px 5px); }
+
+  button {
+    font: inherit;
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    width: 100%;
+    margin-top: 10px;
+    padding: 8px 10px;
+    color: var(--accent);
+    background: rgba(79, 216, 232, 0.06);
+    border: 1px solid var(--accent-dim);
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+  }
+  button:hover {
+    background: rgba(79, 216, 232, 0.14);
+    border-color: var(--accent);
+    box-shadow: 0 0 14px rgba(79, 216, 232, 0.2);
+  }
+
+  .hint {
+    margin: 8px 0 0;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #c9dcec;
+    letter-spacing: 0.02em;
+  }
+
+  /* ---------- 矢量数据导入 ---------- */
+  #drop {
+    margin-top: 2px;
+    padding: 15px 10px;
+    text-align: center;
+    font-size: 11.5px;
+    line-height: 1.7;
+    color: #8fb0c9;
+    border: 1px dashed #2a4c72;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, color 0.15s;
+  }
+  #drop::before {
+    content: "+";
+    display: block;
+    margin-bottom: 2px;
+    font-family: var(--mono);
+    font-size: 16px;
+    line-height: 1;
+    color: var(--accent-dim);
+    transition: color 0.15s, transform 0.2s;
+  }
+  #drop:hover::before, #drop.over::before { color: var(--accent); transform: scale(1.15); }
+  #drop:hover, #drop.over {
+    border-color: var(--accent);
+    background: rgba(79, 216, 232, 0.08);
+    color: var(--accent);
+  }
+  #drop span {
+    display: block;
+    margin-top: 2px;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    color: var(--muted);
+    letter-spacing: 0.08em;
+  }
+
+  .sel-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .sel-row select {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 20px 4px 6px;
+    font: inherit;
+    font-size: 11px;
+    color: var(--text);
+    background: rgba(10, 24, 40, 0.9);
+    border: 1px solid #2a4c72;
+    border-radius: 3px;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%236e8aa3'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 6px center;
+    transition: border-color 0.15s;
+  }
+  .sel-row select:hover { border-color: var(--accent-dim); }
+  .sel-row select:focus { outline: none; border-color: var(--accent-dim); }
+  .sel-row select option { background: #0a1a2c; color: var(--text); }
+
+  #layer-list {
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  #layer-list li {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    padding: 3px 3px 3px 7px;
+    background: rgba(79, 216, 232, 0.06);
+    border: 1px solid #1d3a5c;
+    border-radius: 3px;
+    font-size: 11.5px;
+  }
+  #layer-list li.empty {
+    justify-content: center;
+    padding: 6px;
+    font-size: 10.5px;
+    color: rgba(110, 138, 163, 0.7);
+    background: none;
+    border-style: dashed;
+  }
+  #layer-list .row.tight { flex: 1; min-width: 0; gap: 6px; padding: 0; }
+  #layer-list .nm {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #a8c0d4;
+  }
+  #layer-list .cnt {
+    flex: 0 0 auto;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  button.mini {
+    flex: 0 0 auto;
+    width: 20px; height: 20px;
+    margin: 0; padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #6e8aa3;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    letter-spacing: 0;
+  }
+  button.mini svg { display: block; }
+  button.mini:hover {
+    color: var(--accent);
+    background: rgba(79, 216, 232, 0.1);
+    border-color: var(--accent-dim);
+    box-shadow: none;
+  }
+
+  #vec-status {
+    margin-top: 7px;
+    font-size: 10.5px;
+    line-height: 1.5;
+    color: #7fd4e4;
+    word-break: break-word;
+  }
+  #vec-status:empty { display: none; }
+  #vec-status.err { color: #ff8a7a; }
+
+  /* ---------- 要素属性卡 ---------- */
+  #popup {
+    min-width: 148px;
+    max-width: 268px;
+    max-height: 234px;
+    overflow: auto;
+    padding: 8px 10px 9px;
+    background: rgba(7, 18, 30, 0.96);
+    border: 1px solid #2a4c72;
+    border-radius: 4px;
+    box-shadow: 0 14px 32px rgba(0, 0, 0, 0.55), 0 0 20px rgba(79, 216, 232, 0.1);
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--text);
+  }
+  #popup .pp-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 5px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid #1d3a5c;
+  }
+  #popup .pp-head span {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.12em;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+  #popup .pp-head button {
+    flex: 0 0 auto;
+    width: 16px; height: 16px;
+    margin: 0; padding: 0;
+    font-size: 13px;
+    line-height: 1;
+    color: var(--muted);
+    background: none;
+    border: none;
+    border-radius: 3px;
+  }
+  #popup .pp-head button:hover { color: var(--text); background: rgba(79, 216, 232, 0.12); }
+  #popup table { border-collapse: collapse; width: 100%; }
+  #popup td { padding: 2px 0; vertical-align: top; }
+  #popup td.k {
+    width: 64px;
+    max-width: 90px;
+    padding-right: 10px;
+    overflow: hidden;
+    font-size: 11px;
+    color: #8fb0cb;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  #popup td.v { color: #d9e8f5; font-size: 12.5px; word-break: break-all; }
+  #popup tr.sep-row td { padding: 4px 0 2px; }
+
+  /* ---------- 悬浮图例卡 ---------- */
+  #legend {
+    position: absolute;
+    right: 16px; bottom: 36px;
+    width: 224px;
+    max-height: 40vh;
+    overflow: auto;
+    padding: 10px 12px 8px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    box-shadow: 0 14px 32px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(79, 216, 232, 0.08);
+    z-index: 9;
+    animation: rise 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) 0.3s both;
+  }
+  #legend:empty { display: none; }
+  .lg-title {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin: 0 0 7px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid #1d3a5c;
+  }
+  .lg-item { margin-bottom: 9px; }
+  .lg-item:last-child { margin-bottom: 2px; }
+  .lg-name { font-size: 13.5px; color: #d9e8f5; margin-bottom: 4px; }
+  .lg-bar {
+    height: 8px;
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px rgba(207, 226, 240, 0.22);
+  }
+  .lg-labels {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--muted);
+    margin-top: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .lg-symbol {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: #bdd6ea;
+  }
+  .lg-symbol + .lg-symbol { margin-top: 4px; }
+  .lg-dot {
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+  }
+  .lg-line {
+    width: 24px; height: 0;
+    border-top: 2px solid #57c9e8;
+    flex: 0 0 auto;
+  }
+
+  /* ---------- 考察站详情卡（右侧） ----------
+     默认位置仅为兜底；打开时 JS 会把它安放在矢量面板正下方、
+     图例卡上方之间的空档里，保证不遮挡任何 UI。 */
+  #station-card {
+    position: absolute;
+    right: 358px; top: 160px;
+    width: 276px;
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 18px 18px 16px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55), 0 0 24px rgba(79, 216, 232, 0.1);
+    z-index: 11;
+    animation: cardIn 0.35s cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+  #station-card[hidden] { display: none; }
+  @keyframes cardIn {
+    from { opacity: 0; transform: translateX(14px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+  #sc-close {
+    width: 20px; height: 20px;
+    margin: 0; padding: 0;
+    font-size: 14px;
+    line-height: 1;
+    color: var(--muted);
+    background: none;
+    border: none;
+    border-radius: 3px;
+    letter-spacing: 0;
+    position: absolute;
+    top: 12px; right: 12px;
+  }
+  #sc-close:hover { color: var(--text); background: rgba(79, 216, 232, 0.12); }
+  #sc-name {
+    margin: 0;
+    padding-right: 26px;
+    font-family: var(--serif);
+    font-size: 21px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    text-shadow: 0 0 16px rgba(79, 216, 232, 0.3);
+  }
+  #sc-en {
+    margin: 4px 0 0;
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    color: #9fc3de;
+    text-transform: uppercase;
+  }
+  .sc-meta { margin-top: 14px; border-top: 1px solid #1d3a5c; }
+  .sc-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(29, 58, 92, 0.55);
+    font-size: 13.5px;
+  }
+  .sc-row .k {
+    flex: 0 0 auto;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: #7fa8c9;
+    letter-spacing: 0.06em;
+  }
+  .sc-row .v { color: var(--text); text-align: right; }
+  #sc-note {
+    margin: 12px 0 0;
+    font-size: 14px;
+    line-height: 1.8;
+    color: #bdd6ea;
+  }
+  #sc-coord {
+    margin: 12px 0 0;
+    padding-top: 9px;
+    border-top: 1px solid #1d3a5c;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: #7fd4e4;
+    letter-spacing: 0.04em;
+    font-variant-numeric: tabular-nums;
+    word-break: break-word;
+  }
+
+  details { margin-top: 10px; }  details summary {
+    font-size: 11px;
+    color: var(--muted);
+    cursor: pointer;
+    list-style: none;
+    letter-spacing: 0.06em;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: "▸ "; }
+  details[open] summary::before { content: "▾ "; }
+  details code {
+    display: block;
+    margin-top: 7px;
+    padding: 8px 9px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    line-height: 1.55;
+    color: #7fd4e4;
+    background: rgba(10, 24, 40, 0.9);
+    border: 1px solid #1d3a5c;
+    border-radius: 3px;
+    word-break: break-word;
+  }
+
+  /* ---------- 底部坐标读数 ---------- */
+  #readout {
+    position: absolute;
+    left: 50%;
+    bottom: 14px;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 14px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5), 0 0 16px rgba(79, 216, 232, 0.08);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    z-index: 10;
+    animation: rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) 0.35s both;
+  }
+  #readout::before {
+    content: "";
+    width: 2px; height: 14px;
+    border-radius: 1px;
+    background: linear-gradient(180deg, var(--accent), transparent);
+  }
+  #readout .grp { display: flex; align-items: center; gap: 6px; }
+  #readout .k {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.08em;
+  }
+  #readout .v { font-family: var(--mono); font-size: 13px; color: var(--text); }
+  #readout .sep { width: 1px; height: 14px; background: var(--line); }
+
+  /* ---------- 加载提示 ---------- */
+  #loader {
+    position: absolute;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    padding: 9px 18px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.14em;
+    color: #7fd4e4;
+    background: rgba(7, 18, 30, 0.94);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.55), 0 0 20px rgba(79, 216, 232, 0.12);
+    transition: opacity 0.4s;
+    z-index: 20;
+  }
+  #loader::before {
+    content: "";
+    display: inline-block;
+    width: 7px; height: 7px;
+    margin-right: 9px;
+    border-radius: 50%;
+    background: var(--accent);
+    vertical-align: 1px;
+    animation: pulse 1.1s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.2; transform: scale(0.75); }
+    50%      { opacity: 1;   transform: scale(1); }
+  }
+  #loader.hide { opacity: 0; pointer-events: none; }
+
+  /* ---------- OpenLayers 控件皮肤 ---------- */
+  .ol-zoom { top: auto; bottom: 58px; left: 16px; }
+  .ol-control { background: none; padding: 0; }
+  .ol-control button {
+    width: 30px; height: 30px;
+    margin: 0 0 3px;
+    font-size: 16px;
+    line-height: 1;
+    color: var(--text);
+    background: rgba(10, 24, 40, 0.92);
+    border: 1px solid #2a4c72;
+    border-radius: 3px;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+  }
+  .ol-control button:hover,
+  .ol-control button:focus {
+    background: rgba(79, 216, 232, 0.14);
+    border-color: var(--accent-dim);
+    color: var(--accent);
+  }
+  .ol-scale-bar { left: 16px; bottom: 16px; }
+  .ol-scale-bar-inner { font-size: 10px; color: var(--text); }
+  .ol-scale-step-text { color: var(--text); text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8); }
+  .ol-scale-step-marker { border-color: var(--text); }
+  .ol-scale-singlebar-even { background: #57c9e8; }
+  .ol-scale-singlebar-odd { background: rgba(10, 24, 40, 0.85); }
+  .ol-attribution {
+    right: 10px; bottom: 6px;
+    background: rgba(7, 18, 30, 0.85);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 0 4px;
+  }
+  .ol-attribution ul { font-size: 10px; color: var(--muted); margin: 2px 4px; }
+  .ol-attribution a { color: var(--accent); }
+
+  @media (max-width: 720px) {
+    #topbar { gap: 10px; padding: 0 12px; }
+    #topbar .tb-sub, #topbar .tb-sep, #topbar .tb-item:not(.tb-clock) { display: none; }
+    #topbar .tb-title { font-size: 13px; letter-spacing: 0.14em; }
+    #panel {
+      width: calc(100% - 20px);
+      left: 10px; top: 54px; right: 10px;
+      max-height: 46vh;
+      padding: 12px;
+    }
+    #vecpanel {
+      left: 10px; right: 10px;
+      top: auto; bottom: 64px;
+      width: auto;
+      max-height: 40vh;
+      padding: 12px;
+    }
+    #panel h1 {
+      font-size: 15px;
+      cursor: pointer;
+      user-select: none;
+    }
+    /* 窄屏面板占了近半屏高，默认收起成标题栏，否则地图中心被压住。
+       点标题展开，图标指示当前状态。 */
+    #panel h1::after {
+      content: "▸";
+      float: right;
+      font-size: 11px;
+      line-height: 1.6;
+      color: var(--muted);
+      background: none;
+      width: auto; height: auto;
+      margin: 0;
+    }
+    #panel:not(.collapsed) h1::after { content: "▾"; }
+    #panel.collapsed > *:not(h1) { display: none !important; }
+    #readout {
+      left: 10px; right: 10px;
+      transform: none;
+      justify-content: center;
+      gap: 8px;
+      padding: 6px 10px;
+      bottom: 30px;
+      font-size: 10.5px;
+    }
+    #readout .res { display: none; }
+    #readout .sep { display: none; }
+    #legend { right: 10px; bottom: 64px; width: 180px; }
+    /* 窄屏：统计卡隐藏，矢量入口图标移到顶栏下方 */
+    #stats { display: none; }
+    #vec-fab { top: 54px; right: 10px; }
+    #reset-view { top: 100px; right: 10px; }
+    #st-list-btn { display: none; }
+    #station-list { left: 10px; right: 10px; top: 54px; width: auto; }
+    /* 窄屏：详情卡放到底部，避开读数条 */
+    #station-card {
+      left: 10px; right: 10px;
+      top: auto; bottom: 64px;
+      width: auto;
+      max-height: 38vh;
+      animation: none;
+    }
+    .ol-zoom { display: none; }
+    .ol-scale-bar { bottom: 6px; left: 10px; }
+    .ol-attribution { bottom: 54px; right: 8px; }
+    .ol-attribution ul { font-size: 9px; }
+  }
+</style>
+</head>
+<body>
+<div id="map"><div id="ring"></div></div>
+
+<header id="topbar">
+  <span class="tb-title">南极<b>态势</b>感知系统</span>
+  <span class="tb-sub">极射立体投影 · 实时态势监测</span>
+  <span class="tb-spacer"></span>
+  <span class="tb-item"><span class="tb-dot"></span>数据链路 <span class="v">在线</span></span>
+  <span class="tb-sep"></span>
+  <span class="tb-item">站点 <span class="v" id="tb-count">—</span></span>
+  <span class="tb-sep"></span>
+  <span class="tb-item"><span class="v" id="tb-clock">--:--:--</span> 北京时间</span>
+  <a class="tb-gh" href="https://github.com/chwang9/antarctic-ol-proj4" target="_blank" rel="noopener" title="GitHub 源码">
+    <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+  </a>
+</header>
+
+<button id="vec-fab" type="button" title="矢量数据导入">
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M12 3l9 5-9 5-9-5z"/>
+    <path d="M3 13l9 5 9-5"/>
+    <path d="M3 17.5l9 5 9-5" opacity="0.5"/>
+  </svg>
+</button>
+
+<button id="reset-view" type="button" title="重置视图">
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+    <circle cx="12" cy="12" r="7"/>
+    <path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>
+    <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>
+  </svg>
+</button>
+
+<aside id="stats">
+  <p class="st-title">数据统计</p>
+  <div class="st-sec">南极洲概况</div>
+  <div class="st-row"><span class="k">总面积</span><span class="v">约 1,420 万平方公里</span></div>
+  <div class="st-row"><span class="k">平均海拔</span><span class="v">约 2,300 米 · 七大洲最高</span></div>
+  <div class="st-row"><span class="k">冰盖平均厚度</span><span class="v">约 2,160 米</span></div>
+  <div class="st-row"><span class="k">冰盖最大厚度</span><span class="v">超 4,700 米</span></div>
+  <div class="st-row"><span class="k">冰盖淡水储量</span><span class="v">约占全球 70%</span></div>
+  <div class="st-row"><span class="k">最大冰架</span><span class="v">罗斯冰架 约 47 万平方公里</span></div>
+  <div class="st-row"><span class="k">海岸线长度</span><span class="v">约 1.8 万公里</span></div>
+  <div class="st-row"><span class="k">最低气温</span><span class="v">-89.2°C</span></div>
+  <div class="st-sec st-sec-row"><span>科考站统计</span><button id="st-list-btn" type="button" title="全部科考站列表">列表</button></div>
+  <div class="st-row"><span class="k">考察站总数</span><span class="v" id="st-total">—</span></div>
+  <div class="st-row"><span class="k">常年站 / 夏季站</span><span class="v" id="st-type">—</span></div>
+  <div class="st-row"><span class="k">运营国家与组织</span><span class="v" id="st-nation">—</span></div>
+  <div class="st-row"><span class="k">中国考察站</span><span class="v hl" id="st-cn">—</span></div>
+  <div class="st-row"><span class="k">最早建站</span><span class="v" id="st-first">—</span></div>
+  <div class="st-row"><span class="k">最新建站</span><span class="v" id="st-latest">—</span></div>
+  <div class="st-row"><span class="k">74.5°S 以南站</span><span class="v" id="st-inland">—</span></div>
+  <div class="st-row"><span class="k">乔治王岛聚集</span><span class="v" id="st-kgi">—</span></div>
+</aside>
+
+<aside id="station-list" hidden>
+  <div class="sl-head">
+    <p class="sl-title">全部科考站 <span class="sl-count" id="sl-count"></span></p>
+    <button class="sl-close" id="sl-close" type="button" title="关闭">×</button>
+  </div>
+  <div class="sl-tools">
+    <input id="sl-search" type="text" placeholder="搜索站名 / 国家">
+    <button id="sl-csv" type="button" title="下载表格文件">下载表格</button>
+    <button id="sl-geo" type="button" title="下载地理数据">下载数据</button>
+  </div>
+  <ul class="sl-body" id="sl-body"></ul>
+</aside>
+
+<aside id="panel">
+  <h1>南极洲</h1>
+  <p class="sub">极射立体投影坐标系 · 南极全景态势</p>
+
+  <div class="hr"></div>
+
+  <p class="grp-title">底图</p>
+  <div class="sel-row" style="margin-bottom:12px;">
+    <select id="sel-basemap"></select>
+  </div>
+
+  <p class="grp-title">基础图层</p>
+  <label class="row">
+    <input type="checkbox" id="cb-station" checked>
+    <span class="lyr-txt">考察站<span class="lyr-sub">55 站点位 · 2024 年更新</span></span>
+  </label>
+  <label class="row">
+    <input type="checkbox" id="cb-grat" checked>
+    <span class="lyr-txt">经纬网<span class="lyr-sub">15° 间隔 · 自绘参考线</span></span>
+    <span class="swatch sw-grat"></span>
+  </label>
+  <label class="row">
+    <input type="checkbox" id="cb-circle" checked>
+    <span class="lyr-txt">南极圈 66°33′S<span class="lyr-sub">极昼极夜边界参考线</span></span>
+    <span class="swatch sw-circle"></span>
+  </label>
+
+  <p class="grp-title">冰盖与冰川</p>
+  <label class="row">
+    <input type="checkbox" id="cb-vel">
+    <span class="lyr-txt">冰流速 · 年际合成<span class="lyr-sub">雷达干涉年均流速 · 静态合成</span></span>
+    <span class="swatch sw-vel"></span>
+  </label>
+  <label class="row">
+    <input type="checkbox" id="cb-snow">
+    <span class="lyr-txt">雪覆盖指数<span class="lyr-sub">光学遥感日产品 · 2025-01-15</span></span>
+    <span class="swatch" style="background:linear-gradient(135deg,#3f6fb5,#e6f2ff);"></span>
+  </label>
+
+  <p class="grp-title">海洋与海冰</p>
+  <label class="row">
+    <input type="checkbox" id="cb-coast">
+    <span class="lyr-txt">海岸线矢量<span class="lyr-sub">南极数字数据库 · 静态</span></span>
+  </label>
+  <label class="row">
+    <input type="checkbox" id="cb-seaice">
+    <span class="lyr-txt">海冰密集度 · 微波遥感<span class="lyr-sub">被动微波日产品 · 2025-01-15</span></span>
+    <span class="swatch" style="background:linear-gradient(135deg,#7fbde8,#f2fbff);"></span>
+  </label>
+  <label class="row">
+    <input type="checkbox" id="cb-icetemp">
+    <span class="lyr-txt">海冰表面温度 · 红外遥感<span class="lyr-sub">热红外日产品 · 2025-01-15</span></span>
+    <span class="swatch" style="background:linear-gradient(135deg,#22338f,#57c9e8,#fff45f);"></span>
+  </label>
+
+  <p class="grp-title">大气环境</p>
+  <label class="row">
+    <input type="checkbox" id="cb-airtemp">
+    <span class="lyr-txt">地表气温 · 大气探测<span class="lyr-sub">大气探测日产品 · 2025-01-15</span></span>
+    <span class="swatch" style="background:linear-gradient(135deg,#3d1c66,#c9427c,#ffd94a);"></span>
+  </label>
+  <p class="hint">专题图层为 2025-01-15（南半球盛夏）合成，半透明叠加在底图上</p>
+
+  <p class="hint">拖动平移 · 滚轮缩放 · 悬停读取坐标</p>
+</aside>
+
+<aside id="vecpanel" class="corner">
+  <div class="vp-head">
+    <h2>矢量数据</h2>
+    <button type="button" id="vec-toggle" title="收起 / 展开">–</button>
+  </div>
+  <div class="vp-body">
+    <p class="grp-title">数据导入</p>
+
+    <div id="drop">拖入文件，或点击选择<span>多种地理数据格式 · 自动识别</span></div>
+    <input type="file" id="file-input" hidden multiple
+           accept=".json,.geojson,.kml,.gpx,.csv,.txt">
+
+    <div class="sel-row">
+      <span>源坐标系</span>
+      <select id="src-proj">
+        <option value="auto">自动识别</option>
+        <option value="EPSG:4326">经纬度坐标</option>
+        <option value="EPSG:3031">南极极射投影</option>
+        <option value="EPSG:3413">极射海冰投影</option>
+      </select>
+    </div>
+
+    <ul id="layer-list"></ul>
+    <div id="vec-status"></div>
+  </div>
+</aside>
+
+<aside id="legend"></aside>
+
+<aside id="station-card" hidden>
+  <button type="button" id="sc-close" title="关闭">×</button>
+  <h3 id="sc-name"></h3>
+  <p id="sc-en"></p>
+  <div class="sc-meta">
+    <div class="sc-row"><span class="k">运营国</span><span class="v" id="sc-country"></span></div>
+    <div class="sc-row"><span class="k">建站年份</span><span class="v" id="sc-year"></span></div>
+    <div class="sc-row"><span class="k">类型</span><span class="v" id="sc-status"></span></div>
+    <div class="sc-row"><span class="k">研究方向</span><span class="v" id="sc-research"></span></div>
+  </div>
+  <p id="sc-note"></p>
+  <p id="sc-coord"></p>
+</aside>
+
+<div id="readout">
+  <span class="grp"><span class="k">投影坐标</span><span class="v" id="out-xy">—</span></span>
+  <span class="sep"></span>
+  <span class="grp"><span class="k">经纬度</span><span class="v" id="out-ll">—</span></span>
+  <span class="sep"></span>
+  <span class="grp res"><span class="k">分辨率</span><span class="v" id="out-res">—</span></span>
+</div>
+
+<div id="loader">正在加载南极底图…</div>
+
+<div id="pp-wrap">
+  <div id="popup">
+    <div class="pp-head">
+      <span id="pp-title">属性</span>
+      <button type="button" id="pp-close" title="关闭">×</button>
+    </div>
+    <table id="pp-body"></table>
+  </div>
+</div>
+
+<script src="https://unpkg.com/proj4@2.15.0/dist/proj4.js"></script>
+<script src="https://unpkg.com/ol@10.4.0/dist/ol.js"></script>
+<script>
+  /* 指挥条实时时钟（北京时间） */
+  (function clockLoop() {
+    var el = document.getElementById('tb-clock');
+    if (!el) return;
+    function tick() {
+      var now = new Date();
+      var bj = new Date(now.getTime() + now.getTimezoneOffset() * 60000 + 8 * 3600000);
+      var p = function (n) { return (n < 10 ? '0' : '') + n; };
+      el.textContent = bj.getFullYear() + '-' + p(bj.getMonth() + 1) + '-' + p(bj.getDate()) +
+        ' ' + p(bj.getHours()) + ':' + p(bj.getMinutes()) + ':' + p(bj.getSeconds());
+    }
+    tick();
+    setInterval(tick, 1000);
+  })();
+(function () {
+  'use strict';
+
+  var PROJ = 'EPSG:3031';
+  // 视野范围：与 GIBS 金字塔严格一致（±4194304 m ≈ 到 55°S），保证瓦片 1:1 对齐
+  var EXTENT = [-4194304, -4194304, 4194304, 4194304];
+  // GIBS 的 EPSG:3031 瓦片金字塔固定范围 ±4194304 m（2^22），512 px 瓦片
+  var GIBS = 'https://gibs.earthdata.nasa.gov/wmts/epsg3031/best';
+
+  /* =========================================================
+     1. proj4 定义南极极射立体投影，并交回 OpenLayers 使用
+     ========================================================= */
+  proj4.defs(PROJ,
+    '+proj=stere +lat_0=-90 +lat_ts=-71 +lon_0=0 +k=1 ' +
+    '+x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs');
+
+  // NSIDC 南极点海冰投影：部分冰架 / 海冰专题数据以它发布，导入时要认得
+  proj4.defs('EPSG:3413',
+    '+proj=stere +lat_0=-90 +lat_ts=-70 +lon_0=-45 ' +
+    '+x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs');
+
+  if (ol.proj.proj4 && ol.proj.proj4.register) {
+    ol.proj.proj4.register(proj4);           // OL 5.3+ 的标准入口
+  } else {
+    // 兜底：手动注册投影 + 正反变换（变换数学全部交给 proj4）
+    ol.proj.addProjection(new ol.proj.Projection({
+      code: PROJ, units: 'm', axisOrientation: 'enu'
+    }));
+    ol.proj.addCoordinateTransforms('EPSG:4326', PROJ,
+      function (c) { return proj4('EPSG:4326', PROJ, c).slice(0, 2); },
+      function (c) { return proj4(PROJ, 'EPSG:4326', c).slice(0, 2); });
+  }
+
+  var projection = ol.proj.get(PROJ);
+  projection.setExtent(EXTENT);              // 供瓦片网格使用
+  projection.setWorldExtent([-180, -90, 180, -45]);   // 部分 OL 组件需要，缺省为 null
+
+  /* =========================================================
+     2. 瓦片网格：与数据源金字塔逐像素对齐
+        z0 分辨率 8192 m/px（2×2 张 512px 瓦片覆盖全范围），每级减半。
+        对齐后每个请求正好命中 GIBS 的一张瓦片，服务端不做重采样。
+     ========================================================= */
+  var TILE = 512;
+  var RES0 = 8192;
+  var MAX_Z = 4;                       // Blue Marble 在 500m 矩阵集最深到 z4（512 m/px）
+  var resolutions = [];
+  for (var i = 0; i <= MAX_Z; i++) resolutions.push(RES0 / Math.pow(2, i));
+
+  var tileGrid = new ol.tilegrid.TileGrid({
+    extent: EXTENT,
+    origin: [EXTENT[0], EXTENT[3]],
+    resolutions: resolutions,
+    tileSize: TILE,
+    // zDirection: 1 = 视口分辨率落在两级之间时，一律取更细的一级（降采样），
+    // 保证任何缩放下都只缩小不放大，不会出现插值糊图。
+    zDirection: 1
+  });
+
+  /* =========================================================
+     3. 图层：NASA GIBS 原生提供 EPSG:3031，无需客户端重投影
+     ========================================================= */
+  // WMTS RESTful 模板：/{layer}/default/{tileMatrixSet}[/{time}]/{z}/{y}/{x}.{ext}
+  // 注意顺序是 z/y/x（OL 按占位符名替换，与顺序无关），无需任何请求参数，
+  // 因此可被浏览器/CDN 正常缓存，拖动时不重复取图。
+  // 矩阵集最深层级：500m → z4（512 m/px），250m → z5（256 m/px）。
+  // 每个矩阵集一份瓦片网格，缓存复用。
+  var gridCache = {};
+  function gridFor(set) {
+    if (gridCache[set]) return gridCache[set];
+    // GIBS 各矩阵集最深层级：250m → z5（256 m/px），500m → z4（512），1km → z3（1024）
+    var zMax = set === '250m' ? 5 : (set === '1km' ? 3 : 4);
+    var res = [];
+    for (var i = 0; i <= zMax; i++) res.push(RES0 / Math.pow(2, i));
+    return gridCache[set] = new ol.tilegrid.TileGrid({
+      extent: EXTENT,
+      origin: [EXTENT[0], EXTENT[3]],
+      resolutions: res,
+      tileSize: TILE,
+      // zDirection: 1 = 视口分辨率落在两级之间时，一律取更细的一级（降采样），
+      // 保证任何缩放下都只缩小不放大，不会出现插值糊图。
+      zDirection: 1
+    });
+  }
+  var tileGrid = gridFor('500m');
+
+  function gibsTiles(spec, opts) {
+    var url = GIBS + '/' + spec.layer + '/default/' + spec.set +
+              (spec.time ? '/' + spec.time : '') + '/{z}/{y}/{x}.' + spec.ext;
+    return new ol.layer.Tile(Object.assign({
+      source: new ol.source.XYZ({
+        url: url,
+        projection: PROJ,
+        tileGrid: gridFor(spec.set),
+        // 极射投影在 x 方向没有可循环的世界副本，开启 wrapX 会在
+        // 拖动时算出域外的 x 坐标，白等一圈请求后仍拿不到图（黑块）。
+        wrapX: false,
+        // 瓦片加载淡入：缩放/重置时新层级瓦片是渐显而不是「啪」地整块替换，
+        // 视觉上不会有黑白闪烁的跳变感。
+        transition: 200,
+        attributions: spec.attr || '数据来源：美国宇航局地球观测数据服务'
+      })
+    }, opts || {}));
+  }
+
+  /* ---------- 底图切换 ----------
+     全部取自 GIBS EPSG:3031 矩阵集（已逐一验证瓦片可取）：
+     · BlueMarble_ShadedRelief_Bathymetry —— 地形+水深（默认）
+     · BlueMarble_ShadedRelief + Coastlines —— 灰度地形描海岸线，
+       即 Quantarctica 桌面包那种「白纸黑线」制图风
+     · SCAR_Land_Water_Map —— SCAR 南极陆地/水域专题图
+     · MODIS_Terra_CorrectedReflectance_TrueColor —— 250m 真彩卫星，
+       取南半球盛夏合成日（云量最低）
+     多图层底图（灰度+海岸线）作为一个组整体切换。 */
+  var BASEMAPS = [
+    {
+      id: 'bm',
+      label: '地形 · 水深（默认）',
+      specs: [{ layer: 'BlueMarble_ShadedRelief_Bathymetry', set: '500m', ext: 'jpeg' }]
+    },
+    {
+      id: 'topo',
+      label: '灰度制图风格',
+      specs: [
+        { layer: 'BlueMarble_ShadedRelief', set: '500m', ext: 'jpeg' },
+        { layer: 'Coastlines', set: '250m', ext: 'png', attr: '海岸线矢量 · 美国宇航局地球观测数据服务' }
+      ]
+    },
+    {
+      id: 'scar',
+      label: '陆地水域专题图',
+      specs: [{ layer: 'SCAR_Land_Water_Map', set: '250m', ext: 'png', attr: '陆地水域专题图 · 南极研究科学委员会' }]
+    },
+    {
+      id: 'modis',
+      label: '卫星真彩影像 · 2025-01-15',
+      specs: [{ layer: 'MODIS_Terra_CorrectedReflectance_TrueColor', set: '250m', ext: 'jpg', time: '2025-01-15' }]
+    }
+  ];
+
+  var basemapGroups = BASEMAPS.map(function (b, gi) {
+    return {
+      id: b.id,
+      layers: b.specs.map(function (s) {
+        return gibsTiles(s, { zIndex: 0, visible: gi === 0 });
+      })
+    };
+  });
+  function setBasemap(id) {
+    basemapGroups.forEach(function (g) {
+      g.layers.forEach(function (l) { l.setVisible(g.id === id); });
+    });
+  }
+
+  // 冰流速（PNG 带透明通道）
+  var velocityLayer = gibsTiles(
+    { layer: 'MEaSUREs_Ice_Velocity_Antarctica', set: '500m', ext: 'png' },
+    { zIndex: 2, opacity: 0.68, visible: false }
+  );
+
+  // 经纬网：自行用 proj4 生成。
+  // 说明：未使用 ol.layer.Graticule —— 它依赖 projection.getWorldExtent()，
+  // 纯 proj4 定义的投影没有该值，会抛 "Cannot read properties of null"。
+  function polarPoint(lon, lat) {
+    return proj4('EPSG:4326', PROJ, [lon, lat]);
+  }
+
+  var gratFeatures = [];
+  var gratTexts = [];
+
+  // 经线：每 30°，从 62°S 画到极点。
+  // 圆盘视野约为 60.3°S 以内，更外的线段会被圆周裁掉，不必生成。
+  for (var mLon = -180; mLon < 180; mLon += 30) {
+    var seg = [];
+    for (var lat = -62; lat >= -90; lat -= 2) seg.push(polarPoint(mLon, lat));
+    gratFeatures.push(new ol.Feature(new ol.geom.LineString(seg)));
+  }
+
+  // 纬线：65/70/75/80°S（60°S 落在圆周之外，画了也看不见）
+  for (var pLat = -65; pLat >= -80; pLat -= 5) {
+    var ring = [];
+    for (var pLon = -180; pLon <= 180; pLon += 2) ring.push(polarPoint(pLon, pLat));
+    gratFeatures.push(new ol.Feature(new ol.geom.LineString(ring)));
+
+    // 65°S 在经度 45° 方向已出陆地、落在深色海面上，深色字看不清，
+    // 因此 65°S 只画线不注记；70/75/80°S 均在冰盖内。
+    if (pLat <= -70) {
+      gratTexts.push(new ol.Feature({
+        geometry: new ol.geom.Point(polarPoint(45, pLat)),
+        label: Math.abs(pLat) + '°S',
+        kind: 'lat'
+      }));
+    }
+  }
+
+  // 经度方位：极地图的惯例标注。南极点俯视下 0° 指向画面正上方、
+  // 90°E 向右、180° 向下、90°W 向左（方向已用 pyproj 核对符号）。
+  [[0, '0°'], [90, '90°E'], [180, '180°'], [-90, '90°W']].forEach(function (d) {
+    gratTexts.push(new ol.Feature({
+      geometry: new ol.geom.Point(polarPoint(d[0], -62)),
+      label: d[1],
+      kind: 'lon'
+    }));
+  });
+
+  var gratLineLayer = new ol.layer.Vector({
+    zIndex: 3,
+    source: new ol.source.Vector({ features: gratFeatures }),
+    style: new ol.style.Style({
+      stroke: new ol.style.Stroke({
+        color: 'rgba(150, 205, 240, 0.26)',
+        width: 1,
+        lineDash: [3, 4]
+      })
+    })
+  });
+
+  var gratLabelLayer = new ol.layer.Vector({
+    zIndex: 5,
+    declutter: true,
+    source: new ol.source.Vector({ features: gratTexts }),
+    style: function (f) {
+      // 纬线标注落在白色冰盖上 -> 深字白边；经度方位落在深色海面 -> 浅字深边
+      var isLon = f.get('kind') === 'lon';
+      return new ol.style.Style({
+        text: new ol.style.Text({
+          text: f.get('label'),
+          font: (isLon ? '10.5px' : '11px') + ' "Segoe UI", "Microsoft YaHei", sans-serif',
+          fill: new ol.style.Fill({
+            color: isLon ? 'rgba(186, 220, 242, 0.85)' : 'rgba(24, 50, 68, 0.62)'
+          }),
+          stroke: new ol.style.Stroke({
+            color: isLon ? 'rgba(3, 14, 22, 0.8)' : 'rgba(255, 255, 255, 0.55)',
+            width: 3
+          }),
+          textAlign: 'center',
+          textBaseline: 'middle'
+        })
+      });
+    }
+  });
+
+  /* ---------- 南极圈（66°33′S）---------- */
+  var circleCoords = [];
+  for (var lon = -180; lon <= 180; lon += 2) {
+    circleCoords.push(proj4('EPSG:4326', PROJ, [lon, -66.5608]));
+  }
+  var antarcticCircleLayer = new ol.layer.Vector({
+    zIndex: 4,
+    source: new ol.source.Vector({
+      features: [
+        new ol.Feature(new ol.geom.LineString(circleCoords)),
+        new ol.Feature({
+          geometry: new ol.geom.Point(proj4('EPSG:4326', PROJ, [200, -66.5608])),
+          label: '南极圈 66°33′S'
+        })
+      ]
+    }),
+    style: function (f) {
+      if (f.getGeometry().getType() === 'Point') {
+        return new ol.style.Style({
+          text: new ol.style.Text({
+            text: f.get('label'),
+            font: '10.5px "Segoe UI", "Microsoft YaHei", sans-serif',
+            fill: new ol.style.Fill({ color: 'rgba(150, 205, 240, 0.9)' }),
+            stroke: new ol.style.Stroke({ color: 'rgba(3, 14, 22, 0.85)', width: 3 }),
+            textAlign: 'center',
+            textBaseline: 'middle'
+          })
+        });
+      }
+      return new ol.style.Style({
+        stroke: new ol.style.Stroke({
+          color: 'rgba(127, 198, 240, 0.85)',
+          width: 1.6,
+          lineDash: [7, 5]
+        })
+      });
+    }
+  });
+
+  /* ---------- 考察站 ----------
+     全部常年站 + 主要夏季站（约 50 个，28 个国家/地区运营）。
+     n=中文名 en=英文名 ct=运营国 y=建站 s=类型 note=简介
+     cn=true 表示中国站（地图上橙色高亮）。
+     坐标以各站公开资料为准，个别冰流移动站（如哈雷）为近似位置。 */
+  var STATIONS = [
+    /* —— 中国 —— */
+    { n: '长城站', en: 'Great Wall Station', ct: '中国', y: 1985, s: '常年', lat: -62.216, lon: -58.962, cn: true, r: '极地生态 · 气象 · 地震观测', note: '中国第一个南极考察站，1985 年建于乔治王岛菲尔德斯半岛的无冰雪丘陵地带，夏季可容纳约 80 人。主攻极地生态、气象与重力/地震观测，附近有企鹅与海豹栖息地，站区建有中国南极考察纪念碑。' },
+    { n: '中山站', en: 'Zhongshan Station', ct: '中国', y: 1989, s: '常年', lat: -69.373, lon: 76.372, cn: true, r: '高空大气物理 · 冰川 · 气象', note: '1989 年建于东南极拉斯曼丘陵，面向普里兹湾，与俄罗斯进步站相距约 1 km。是内陆冰盖考察（泰山站—冰穹 A 方向）的门户基地，常年开展极光与高空大气物理、海冰与冰川观测。' },
+    { n: '昆仑站', en: 'Kunlun Station', ct: '中国', y: 2009, s: '夏季', lat: -80.417, lon: 77.117, cn: true, r: '深冰芯 · 天文观测 · 冰盖演化', note: '2009 年建于冰穹 A，海拔约 4093 m，是南极海拔最高的考察站，冬季气温可低至 -80°C。以深冰芯钻探、天文观测（AST3 望远镜阵列）与冰盖内部结构研究为核心目标，目前为夏季站。' },
+    { n: '泰山站', en: 'Taishan Station', ct: '中国', y: 2014, s: '夏季', lat: -73.864, lon: 76.974, cn: true, r: '内陆中继 · 冰盖运动', note: '2014 年建于中山站至冰穹 A 的中途，外形如灯笼，站体架空防积雪掩埋。承担内陆车队中继补给，兼做冰盖运动、气象与空间环境观测，为夏季站。' },
+    { n: '秦岭站', en: 'Qinling Station', ct: '中国', y: 2024, s: '常年', lat: -74.945, lon: 163.702, cn: true, r: '海洋环境 · 生态 · 冰架观测', note: '2024 年 2 月建成开站，位于罗斯海恩克斯堡岛，是中国第五个、面向太平洋扇区的常年站。主站房采用装配式轻钢模块结构，重点开展罗斯海海洋环境与生态系统长期观测。' },
+    /* —— 美国 —— */
+    { n: '阿蒙森-斯科特站', en: 'Amundsen–Scott South Pole Station', ct: '美国', y: 1956, s: '常年', lat: -90.000, lon: 0.000, cn: false, r: '中微子天文 · 大气监测 · 宇宙射线', note: '1956 年建于地理南极点，海拔 2835 m，以首批抵达极点的两位探险家命名。现役高架站房 2010 年投用，冰盖流动使站体每年相对极点位移约 10 m。站下 1.5–2.5 km 冰层内嵌有 IceCube 中微子观测阵列，冬季最低温约 -75°C。' },
+    { n: '麦克默多站', en: 'McMurdo Station', ct: '美国', y: 1956, s: '常年', lat: -77.846, lon: 166.676, cn: false, r: '总体后勤枢纽 · 海洋 · 冰川', note: '1956 年建立于罗斯岛哈特角，是美国也是全南极规模最大的考察站，夏季可容纳逾千人，被称为「南极第一城」。拥有港口与两条机场跑道，是通往内陆与南极点方向考察的总体后勤枢纽。' },
+    { n: '帕尔默站', en: 'Palmer Station', ct: '美国', y: 1968, s: '常年', lat: -64.770, lon: -64.050, cn: false, r: '海洋生态长期观测 (LTER)', note: '1968 年建于安弗斯岛，面向南极半岛西侧帕默群岛海域，规模较小（夏季约 40 人）。以海洋生态系统长期观测（PAL-LTER）著称，是全球研究气候变暖对极地生态影响的指标性站点。' },
+    /* —— 俄罗斯 —— */
+    { n: '沃斯托克站', en: 'Vostok Station', ct: '俄罗斯', y: 1957, s: '常年', lat: -78.464, lon: 106.832, cn: false, r: '深部钻探 · 冰下湖 · 气候记录', note: '1957 年建立于东南极内陆高原，1983 年实测全球最低气温 -89.2°C。站下方约 3700 m 冰层之下是沃斯托克冰下湖，钻探取得的深冰芯已恢复过去 42 万年的气候记录，冬季仅约 10 人留守。' },
+    { n: '米尔尼站', en: 'Mirny Station', ct: '俄罗斯', y: 1956, s: '常年', lat: -66.553, lon: 93.013, cn: false, r: '气象 · 海洋 · 冰川观测', note: '1956 年建立于戴维斯海沿岸，是俄罗斯南极考察的母港基地与船队靠泊点。常年开展气象、海洋与冰川观测，冬季约 20 人越冬。' },
+    { n: '进步站', en: 'Progress Station', ct: '俄罗斯', y: 1988, s: '常年', lat: -69.438, lon: 76.323, cn: false, r: '内陆后勤 · 蓝冰跑道 · 海洋观测', note: '1988 年建立于普里兹湾畔，是俄罗斯内陆考察的后勤枢纽，配有蓝冰跑道与雪地车队。距中国中山站仅约 1 km，两站长期互通协作。' },
+    { n: '别林斯高晋站', en: 'Bellingshausen Station', ct: '俄罗斯', y: 1968, s: '常年', lat: -62.190, lon: -58.940, cn: false, r: '海洋生物 · 气象观测', note: '1968 年建于乔治王岛，以发现南极的俄国航海家别林斯高晋命名。以海洋生物学与气象观测为主，站区建有南极著名的三一教堂，是半岛方向俄方主要站点。' },
+    { n: '新拉扎列夫站', en: 'Novolazarevskaya Station', ct: '俄罗斯', y: 1961, s: '常年', lat: -70.811, lon: 11.938, cn: false, r: '气象 · 冰川 · 地质考察', note: '1961 年建立于毛德皇后地，站区附近的蓝冰跑道可承接洲际直飞，是南极少数全年通航点之一。以气象、冰川与地质考察为主，邻近印度迈特里站与德国诺伊迈尔站。' },
+    { n: '青年站', en: 'Molodyozhnaya Station', ct: '俄罗斯', y: 1962, s: '夏季', lat: -67.667, lon: 45.850, cn: false, r: '气象 · 海洋观测 · 航空保障', note: '1962 年建立，曾为苏联规模最大的南极站，1990 年代转为季节性使用。现作夏季气象与海洋观测点，兼具航空保障功能。' },
+    /* —— 澳大利亚 —— */
+    { n: '凯西站', en: 'Casey Station', ct: '澳大利亚', y: 1969, s: '常年', lat: -66.283, lon: 110.517, cn: false, r: '冰川学 · 海冰 · 大气观测', note: '1969 年建立于威尔克斯地文森湾湾畔，是澳大利亚东部沿海考察的指挥中心。以冰川学、海冰与大气观测为主，站区拥有南极规模最大的履带车队群之一，夏季可容约 150 人。' },
+    { n: '戴维斯站', en: 'Davis Station', ct: '澳大利亚', y: 1957, s: '常年', lat: -68.578, lon: 77.968, cn: false, r: '海洋生态 · 海冰研究', note: '1957 年建立于普里兹湾畔维斯塔丘陵，是澳第二大常年站。与中国中山站同处拉斯曼丘陵—普里兹湾区域，是东南极海洋生态与海冰研究的重要基地。' },
+    { n: '莫森站', en: 'Mawson Station', ct: '澳大利亚', y: 1954, s: '常年', lat: -67.600, lon: 62.880, cn: false, r: '地球物理 · 宇宙射线 · 中微子', note: '1954 年建立于霍斯舍港，是澳大利亚最早建成的南极大陆站，以极地探险家道格拉斯·莫森命名。以地球物理与宇宙射线观测闻名，站区配有风力发电机群。' },
+    /* —— 英国 —— */
+    { n: '哈雷站', en: 'Halley VI Research Station', ct: '英国', y: 1956, s: '常年', lat: -75.580, lon: -26.500, cn: false, r: '大气科学 · 臭氧观测', note: '1956 年首建，现役哈雷六号（2013 年投用）是全球首座可整体牵引的模块化雪橇站，因布伦特冰架裂缝发展曾两次整体南迁。1985 年南极臭氧洞的发现即源于该站的长期大气观测，冬季仅约 15 人留守。' },
+    { n: '罗瑟拉站', en: 'Rothera Research Station', ct: '英国', y: 1975, s: '常年', lat: -67.570, lon: -68.130, cn: false, r: '海洋生物 · 冰川 · 航空枢纽', note: '1975 年建立于南极半岛西岸罗瑟拉角，是英国南极调查局（BAS）最大的生物研究基地与航空枢纽，拥有砾石跑道与科考船码头，夏季可容约 100 人。' },
+    { n: '西格尼站', en: 'Signy Research Station', ct: '英国', y: 1947, s: '夏季', lat: -60.700, lon: -45.600, cn: false, r: '企鹅与海鸟种群监测', note: '1947 年建于南奥克尼群岛西格尼岛，现为夏季生态站。以企鹅、海鸟与南极毛皮海豹的长期种群监测为主，观测序列已延续七十余年。' },
+    { n: '洛克罗伊港站', en: 'Port Lockroy', ct: '英国', y: 1944, s: '夏季', lat: -64.825, lon: -63.495, cn: false, r: '南极遗产 · 博物馆 · 企鹅监测', note: '1944 年建于吉迪恩湾，曾是二战英国「塔伯林行动」基地，后转为邮局与博物馆，由英国南极遗产信托管理。是南极最受欢迎的人文景点之一，每年接待数万邮轮游客，兼做巴布亚企鹅种群监测。' },
+    /* —— 挪威 —— */
+    { n: '特罗尔站', en: 'Troll Station', ct: '挪威', y: 1990, s: '常年', lat: -72.014, lon: 2.533, cn: false, r: '卫星遥感 · 地质 · 航空枢纽', note: '1990 年建立于毛德皇后地胡尔泰山旁，站名取自形似巨魔的山岩。2005 年扩建为常年站，配有卫星地面接收站与蓝冰跑道，是挪威极地研究所的科研与航空枢纽。' },
+    /* —— 德国 —— */
+    { n: '诺伊迈尔Ⅲ站', en: 'Neumayer Station III', ct: '德国', y: 2009, s: '常年', lat: -70.650, lon: -8.250, cn: false, r: '地球物理 · 气象 · 空气化学', note: '2009 年投用的第三代诺伊迈尔站，整座站房架在 16 根液压支柱上，随每年约 10 m 的降雪沉降自动抬升，可全年在 Ekström 冰架运行。' },
+    { n: '科恩站', en: 'Kohnen Station', ct: '德国', y: 2001, s: '夏季', lat: -75.002, lon: 0.068, cn: false, r: '深冰芯钻探', note: '2001 年建立的夏季深冰芯站，位于毛德皇后地内陆海拔 2892 m 处。曾钻取约 3200 m 冰芯，将气候记录恢复至约 8 万年前，距诺伊迈尔 III 站约 330 km。' },
+    /* —— 南非 —— */
+    { n: '萨纳伊Ⅳ站', en: 'SANAE IV', ct: '南非', y: 1997, s: '常年', lat: -71.670, lon: -2.840, cn: false, r: '大气物理 · 空间天气', note: '1997 年投用，是南非第三座南极站，三座双层塔楼以连廊相连，坐落于沃尔塔特峰悬崖上方可俯瞰冰架。以大气物理与空间天气观测为主，冬季约 15 人越冬。' },
+    /* —— 印度 —— */
+    { n: '迈特里站', en: 'Maitri Station', ct: '印度', y: 1989, s: '常年', lat: -70.758, lon: 11.734, cn: false, r: '极地气象 · 通信 · 冰川', note: '1989 年建立于毛德皇后地什尔马赫绿洲，距新拉扎列夫站约 5 km。以极地气象、通信与冰川研究为主，是印度第二个常年站。' },
+    { n: '巴拉提站', en: 'Bharati Station', ct: '印度', y: 2012, s: '常年', lat: -69.407, lon: 76.187, cn: false, r: '海洋观测 · 遥感接收 · 地质', note: '2012 年建成于拉斯曼丘陵，是印度最先进的常年站，采用木结构与集装箱复合模块。以海洋观测、地质与大气科学为主，兼作卫星遥感地面接收站，与中山站、进步站同处一隅。' },
+    /* —— 日本 —— */
+    { n: '昭和站', en: 'Showa Station', ct: '日本', y: 1957, s: '常年', lat: -69.008, lon: 39.589, cn: false, r: '极光 · 高层大气 · 陨石 · 企鹅生态', note: '1957 年建于东翁古尔岛，是日本南极考察的总部基地，站名取自建站当年的年号。以极光与高层大气物理、陨石采集与企鹅生态研究著称，冬季约 30 人越冬。' },
+    { n: '瑞穗站', en: 'Mizuho Station', ct: '日本', y: 1970, s: '夏季', lat: -70.698, lon: 44.617, cn: false, r: '冰盖运动 · 气象观测', note: '1970 年建立于内陆高原，是昭和站向富士圆顶方向的中继观测点，以冰盖运动与气象观测为主，现为夏季站。' },
+    { n: '富士圆顶站', en: 'Dome Fuji Station', ct: '日本', y: 1995, s: '夏季', lat: -77.319, lon: 39.700, cn: false, r: '深冰芯钻探', note: '1995 年建于冰穹 F 海拔 3810 m 处，是日本深冰芯钻探基地。1996 年起钻取的深冰芯将气候记录延伸至约 72 万年前，为夏季作业站。' },
+    /* —— 法国 / 意大利 —— */
+    { n: '康宏站', en: 'Concordia Station (Dome C)', ct: '法国 / 意大利', y: 2005, s: '常年', lat: -75.100, lon: 123.330, cn: false, r: '长期医学隔离 · 天文观测 · 气候记录', note: '2005 年投用，法意两国合建，两座圆柱形塔楼以连廊相连，坐落于海拔 3233 m 的冰穹 C。冬季气温可达 -80°C，因空气纯净与地理隔绝，被欧空局用作长期医学隔离研究基地，也是全球一流的天文观测台址。' },
+    { n: '迪蒙·迪维尔站', en: 'Dumont d\'Urville Station', ct: '法国', y: 1947, s: '常年', lat: -66.663, lon: 140.017, cn: false, r: '阿德利企鹅生态 · 海洋观测', note: '1947 年建立于阿德利地彼得雷尔岛，以法国探险家迪蒙·迪维尔命名。地处南极最强风带之一（年最大风速可超 90 m/s），以阿德利企鹅生态与海洋观测为主。' },
+    { n: '泽卡里站', en: 'Mario Zucchelli Station', ct: '意大利', y: 1986, s: '常年', lat: -74.695, lon: 164.100, cn: false, r: '海洋生态 · 大气物理', note: '1986 年建立于特拉诺瓦湾岸（原名泰拉诺瓦湾站，2004 年为纪念意大利南极计划创始人更名），是意大利南极计划的沿海主站，与韩国张保皋站相邻协作。' },
+    /* —— 韩国 —— */
+    { n: '张保皋站', en: 'Jang Bogo Station', ct: '韩国', y: 2014, s: '常年', lat: -74.625, lon: 164.213, cn: false, r: '冰川 · 海洋 · 大气观测', note: '2014 年建立于特拉诺瓦湾维多利亚地，以新罗航海家张保皋命名，是韩国第二个也是规模最大的南极站，与意大利泽卡里站相邻协作。' },
+    { n: '世宗王站', en: 'King Sejong Station', ct: '韩国', y: 1988, s: '常年', lat: -62.230, lon: -58.780, cn: false, r: '海洋生态 · 气候 · 电离层', note: '1988 年建于乔治王岛南岸，是韩国首个南极站。以海洋生态、气候与电离层观测为主，常年驻守。' },
+    /* —— 阿根廷 —— */
+    { n: '埃斯佩兰萨站', en: 'Esperanza Station', ct: '阿根廷', y: 1952, s: '常年', lat: -63.400, lon: -56.997, cn: false, r: '气象 · 生物学 · 南极家庭生活', note: '1952 年建立于南极半岛希望湾，站名西语意为「希望」。站区设有学校与居民家庭，1978 年在此诞生了南极大陆第一位出生者 Emilio Palma，是南极少有的「有居民」站点。' },
+    { n: '马兰比奥站', en: 'Marambio Station', ct: '阿根廷', y: 1969, s: '常年', lat: -64.270, lon: -56.720, cn: false, r: '空运枢纽 · 气象 · 大气观测', note: '1969 年建立于马兰比奥岛，是阿根廷南极方向的重要空运枢纽，拥有全天候砾石跑道，夏季可容数百人。' },
+    { n: '奥尔卡达斯站', en: 'Orcadas Station', ct: '阿根廷', y: 1904, s: '常年', lat: -60.740, lon: -44.730, cn: false, r: '气象 · 地震观测', note: '1904 年建立于南奥克尼群岛劳里岛，前身是 1903 年苏格兰斯科特医生的气象站，由阿根廷接管后连续运行至今，是南极现存最古老的常年考察站。' },
+    { n: '贝尔格拉诺Ⅱ站', en: 'Belgrano II Station', ct: '阿根廷', y: 1979, s: '常年', lat: -77.867, lon: -34.633, cn: false, r: '高空大气物理', note: '1979 年建立于科茨地龙科加湾，是阿根廷最南端的站，也是少数建在冰架岩壁旁的常年站，以高空大气物理观测为主。' },
+    { n: '卡里尼站', en: 'Carlini Station', ct: '阿根廷', y: 1953, s: '常年', lat: -62.233, lon: -58.667, cn: false, r: '海洋学长期观测', note: '1953 年建立于南设得兰群岛 Potter 湾，以海洋学与大气长期观测为主，2012 年为纪念阿根廷海洋学家 Alejandro Carlini 更名。' },
+    { n: '圣马丁站', en: 'San Martín Station', ct: '阿根廷', y: 1951, s: '常年', lat: -68.133, lon: -67.083, cn: false, r: '冰川 · 气象观测', note: '1951 年建立于玛格丽特湾萨米恩托角，是阿根廷第一个大陆南极站，以冰川与气象观测为主。' },
+    /* —— 智利 —— */
+    { n: '弗雷站', en: 'Eduardo Frei Montalva Station', ct: '智利', y: 1969, s: '常年', lat: -62.200, lon: -58.960, cn: false, r: '南极空中门户 · 气象 · 生态', note: '1969 年建立于乔治王岛法尔德斯湾，与长城站隔湾相邻，是智利南极事务的中心站。站区配有弗雷机场跑道，是各国航班与游客进出南极的主要空中门户之一。' },
+    { n: '奥希金斯站', en: 'General Bernardo O\'Higgins Station', ct: '智利', y: 1948, s: '常年', lat: -63.317, lon: -57.900, cn: false, r: '冰川 · 大气观测', note: '1948 年建立于南极半岛特里尼蒂半岛，以智利独立领袖命名，是智利在大陆上的主要常年站。' },
+    { n: '埃斯库德罗站', en: 'Escudero Station', ct: '智利', y: 1994, s: '夏季', lat: -62.183, lon: -58.967, cn: false, r: '生态与海洋研究支撑', note: '1994 年建立的夏季站，位于弗雷站旁阿德利湾畔，为智利大学等科研机构提供生态与海洋研究支撑。' },
+    /* —— 其他欧洲国家 —— */
+    { n: '维尔纳茨基站', en: 'Vernadsky Station', ct: '乌克兰', y: 1996, s: '常年', lat: -65.246, lon: -64.257, cn: false, r: '臭氧观测 · 大气化学', note: '1996 年英国将法拉第站连同历年观测数据整体移交乌克兰并更名。是全球臭氧洞观测的重镇（连续记录自 1989 年起），站区小酒吧亦是南极旅行的著名打卡点。' },
+    { n: '阿克托夫斯基站', en: 'Henryk Arctowski Station', ct: '波兰', y: 1977, s: '常年', lat: -62.155, lon: -58.467, cn: false, r: '海岸生态 · 气候变化', note: '1977 年建立于乔治王岛阿德利湾，以波兰地球物理学家阿克托夫斯基命名。以海岸生态、海洋生物与气候变化研究为主，是波兰科学院的常年站。' },
+    { n: '费拉斯站', en: 'Comandante Ferraz Station', ct: '巴西', y: 1984, s: '常年', lat: -62.091, lon: -58.395, cn: false, r: '生物 · 气象 · 海洋研究', note: '1984 年建立于乔治王岛阿德米拉尔湾，2012 年火灾焚毁后于 2020 年重建。新站采用模块化架空结构，以生物与气象研究为主，是巴西唯一的常年站。' },
+    { n: '阿蒂加斯站', en: 'Artigas Station', ct: '乌拉圭', y: 1984, s: '常年', lat: -62.189, lon: -58.908, cn: false, r: '气象 · 海洋 · 生态', note: '1984 年建立于乔治王岛菲尔德斯半岛，是乌拉圭唯一的南极站，以气象、海洋与生态观测为主。' },
+    { n: '伊丽莎白公主站', en: 'Princess Elisabeth Station', ct: '比利时', y: 2009, s: '夏季', lat: -71.950, lon: 23.333, cn: false, r: '零能源技术 · 冰川 · 大气', note: '2009 年建立于毛德皇后地 Utsteinen 山脊，是全球首座零排放极地站，全部由风能与太阳能供电，配有智能电力调度与热水回收系统。夏季运行，以冰川学与大气观测为主。' },
+    { n: '胡安·卡洛斯一世站', en: 'Juan Carlos I Station', ct: '西班牙', y: 1988, s: '夏季', lat: -62.660, lon: -59.900, cn: false, r: '地形测绘 · 生态 · 气候变化', note: '1988 年建立于利文斯顿岛西班牙山，夏季运行。以地形测绘、生物与气候变化观测为主，扩建后可容纳约 40 人。' },
+    { n: '德卡斯蒂利亚站', en: 'Gabriel de Castilla Station', ct: '西班牙', y: 1990, s: '夏季', lat: -62.977, lon: -60.533, cn: false, r: '火山监测 · 海洋生物', note: '1990 年建立于欺骗岛福斯特港火山口内，夏季运行。以火山活动监测与海洋生物研究为主，站名取自 15 世纪西班牙远征将领。' },
+    { n: '门德尔站', en: 'Mendel Polar Station', ct: '捷克', y: 2006, s: '夏季', lat: -63.978, lon: -60.033, cn: false, r: '地质 · 古气候', note: '2006 年建立于詹姆斯罗斯岛，由捷克马萨里克大学运营的夏季站，设施为集装箱改造结构，以地质与古气候研究为主。' },
+    { n: '马丘比丘站', en: 'Machu Picchu Station', ct: '秘鲁', y: 1989, s: '夏季', lat: -62.090, lon: -58.470, cn: false, r: '海洋生物学 · 气象', note: '1989 年建立于乔治王岛马克斯韦尔湾，是秘鲁唯一的南极站，夏季运行，以海洋生物学与气象观测为主。' },
+    /* —— 北欧 —— */
+    { n: '阿博阿站', en: 'Aboa Station', ct: '芬兰', y: 1988, s: '夏季', lat: -73.050, lon: 13.417, cn: false, r: '冰川地质 · 生态', note: '1988 年建立于毛德皇后地西夫斯基湖谷，芬兰夏季站。与瑞典瓦萨站相距约 200 m，两站合用「Nordic 合作区」的后勤与发电设施。' },
+    { n: '瓦萨站', en: 'Wasa Station', ct: '瑞典', y: 1988, s: '夏季', lat: -73.033, lon: 13.425, cn: false, r: '冰川地质 · 生态', note: '1988 年建立于西夫斯基湖谷，瑞典夏季站，是北欧南极合作的组成部分，以冰川地质与生态研究为主。' }
+  ];
+
+  var stationFeatures = STATIONS.map(function (s) {
+    return new ol.Feature({
+      geometry: new ol.geom.Point(ol.proj.fromLonLat([s.lon, s.lat], PROJ)),
+      name: s.n,
+      en: s.en,
+      country: s.ct,
+      year: s.y,
+      status: s.s,
+      research: s.r,
+      note: s.note,
+      cn: s.cn
+    });
+  });
+
+  var stationLayer = new ol.layer.Vector({
+    zIndex: 6,
+    declutter: true,
+    source: new ol.source.Vector({ features: stationFeatures }),
+    style: function (feature) {
+      var cn = feature.get('cn');
+      return new ol.style.Style({
+        image: new ol.style.Circle({
+          radius: cn ? 5.5 : 4.2,
+          fill: new ol.style.Fill({ color: cn ? '#ff6a3d' : '#8fe6ff' }),
+          stroke: new ol.style.Stroke({ color: 'rgba(3, 14, 22, 0.9)', width: 1.5 })
+        }),
+        text: new ol.style.Text({
+          text: feature.get('name'),
+          font: '500 11.5px "Segoe UI", "Microsoft YaHei", sans-serif',
+          fill: new ol.style.Fill({ color: cn ? '#ffe8dd' : '#e7f5ff' }),
+          stroke: new ol.style.Stroke({ color: 'rgba(3, 14, 22, 0.88)', width: 3 }),
+          offsetY: -13,
+          padding: [3, 6, 3, 6]
+        })
+      });
+    }
+  });
+
+  /* =========================================================
+     4. 地图
+     ========================================================= */
+  var view = new ol.View({
+    projection: projection,
+    center: [0, 0],                       // 南极点即原点
+    resolutions: resolutions,
+    zoom: 1,
+    minZoom: 0,
+    maxZoom: MAX_Z,
+    // 不设 extent：extent 约束会把分辨率钉死成「视口宽 = 数据宽」，
+    // 使 view.fit 的 padding 全部失效、圆盘被撑到超出视口高度。
+    // 边界感由圆形裁剪负责（见 §4b）。
+    enableRotation: false,
+    constrainResolution: false
+  });
+
+  // 关闭拖拽惯性：松手后的 500ms 惯性动画无法中途收边，
+  // 会带着圆窗越过数据圆盘边缘，甩出一闪而过的黑块。
+  var interactions = ol.interaction.defaults.defaults({ dragPan: false }).extend([
+    new ol.interaction.DragPan({ kinetic: false })
+  ]);
+
+  var map = new ol.Map({
+    target: 'map',
+    view: view,
+    interactions: interactions,
+    layers: [].concat.apply([], basemapGroups.map(function (g) { return g.layers; }))
+      .concat([
+        velocityLayer,
+        gratLineLayer,
+        antarcticCircleLayer,
+        gratLabelLayer,
+        stationLayer
+      ]),
+    controls: []   // 控件自行添加，避免不同构建版本的导出差异
+  });
+
+  map.addControl(new ol.control.Zoom());
+  map.addControl(new ol.control.ScaleLine({
+    units: 'metric',
+    bar: true,
+    steps: 4,
+    minWidth: 90
+  }));
+  map.addControl(new ol.control.Attribution({ collapsible: false }));
+
+  /* ---------- 圆形版式 ----------
+     极地图的标准呈现：一张圆盘铺在深底上，四角是投影外围的畸变海域。
+     顺手解决一个真问题——方形取景时圆盘被视口高度裁掉、左缘被控制面板压住。
+     圆心恒为视口中心（面板右边界 290px < 圆心 720-半径 406px = 314px，不会遮挡）。
+     移动端 / 过小窗口退回方形取景。 */
+  var CIRCLE = null;        // { cx, cy, r }，屏幕 CSS 像素
+  var RHO_MAX = 4194304;    // GIBS 瓦片覆盖半径，圆不超出它，圆内必为真实数据
+
+  var vecPanelEl = document.getElementById('vecpanel');
+
+  function updateCircle() {
+    var size = map.getSize();
+    if (!size || !size[0] || !size[1] || window.innerWidth <= 720) {
+      CIRCLE = null;
+      return null;
+    }
+    // 左侧让出控制面板（290px）+ 间距，右侧让出矢量数据面板（展开时），
+    // 上下留出比例尺与读数条。圆心取「内容区」中心而非视口中心——
+    // 否则被面板吃掉的部分会让圆明显偏位。
+    // 右侧：数据统计卡常驻（286px + 边距），矢量面板与详情卡悬浮于地图之上，不参与取景
+    var padR = 316;
+    var pad = { t: 44, r: padR, b: 56, l: 306 };
+    var availW = size[0] - pad.l - pad.r;
+    var availH = size[1] - pad.t - pad.b;
+    var r = Math.min(availW, availH) / 2;
+    if (!(r > 80)) { CIRCLE = null; return null; }
+    CIRCLE = {
+      cx: pad.l + availW / 2,
+      cy: pad.t + availH / 2,
+      r: Math.min(r, 512),
+      pad: pad
+    };
+    return CIRCLE;
+  }
+
+  // 程序化取景（首屏 / 重置 / 窗口尺寸变化）期间暂停平移约束：
+  // fit 的目标状态本身合法，若在它逐帧改中心/分辨率时插一脚 setCenter，
+  // 会打断动画、触发多余的重绘和瓦片请求，重置时就会卡顿。
+  var fitting = false;
+
+  function fitAntarctica() {
+    var size = map.getSize();
+    if (!size || !size[0]) {                 // 尺寸未就绪，下一帧重试（原实现直接 return，会永久停在初始视图）
+      requestAnimationFrame(fitAntarctica);
+      return;
+    }
+
+    var c = updateCircle();
+    applyClip();
+
+    fitting = true;
+    if (!c) {
+      // 窄屏：方形取景。视口对角线也要落在数据圆盘内，否则四角露黑；
+      // 因此分辨率取 min(8192, RHO_MAX / 半对角线)。
+      var halfDiag = 0.5 * Math.hypot(size[0], size[1]);
+      view.setCenter([0, 0]);
+      view.setResolution(Math.min(8192, RHO_MAX / halfDiag));
+    } else {
+      // 圆半径对应的地面半径。用 fit + padding 而不是 setCenter：
+      // padding 会把地图中心一并右移，才能和圆形裁剪保持同心。
+      // fit 解出的分辨率正好是 rho/r = 8192（金字塔最粗一级）。
+      var rho = Math.min(c.r * 8192, RHO_MAX);
+      view.fit([-rho, -rho, rho, rho], {
+        size: size,
+        padding: [c.pad.t, c.pad.r, c.pad.b, c.pad.l],
+        duration: 0
+      });
+    }
+    fitting = false;
+  }
+  requestAnimationFrame(fitAntarctica);
+
+  /* ---------- 平移边界：圆窗内不露黑底 ----------
+     GIBS 瓦片只覆盖半径 RHO_MAX 的圆盘，圆盘外没有任何影像，画布透出底色就是黑。
+     约束条件：圆窗圆心到南极点的地面距离 + 圆窗半径（r × res）不得超过 RHO_MAX。
+     圆窗大于数据圆盘时（大窗口、最粗一级）余量为 0，此时不能平移；
+     放大后分辨率变小，允许的平移范围随之扩大。 */
+  var clamping = false;
+
+  function clampCenter() {
+    // fit / 缩放动画进行中不介入：setCenter 会触发 applyTargetState_，
+    // 进而 cancelAnimations()，动画被打断后分辨率会卡在半途
+    // （表现为「再按 + 没反应」「重置回不到最粗一级」）。
+    if (clamping || fitting || view.getAnimating()) return;
+    var res = view.getResolution();
+    var size = map.getSize();
+    var c = view.getCenter();
+    if (!res || !c || !size || !size[0]) return;
+
+    var cx = CIRCLE ? CIRCLE.cx : size[0] / 2;
+    var cy = CIRCLE ? CIRCLE.cy : size[1] / 2;
+    var rPx = CIRCLE ? CIRCLE.r : 0.5 * Math.hypot(size[0], size[1]);
+
+    // 圆窗圆心对应的地面坐标（view 中心被 fit 的 padding 右移，不能直接用）
+    var gx = c[0] + (cx - size[0] / 2) * res;
+    var gy = c[1] - (cy - size[1] / 2) * res;
+    var d = Math.hypot(gx, gy);
+
+    // 数据圆盘放不下整个圆窗时，只能把圆心锁在原点。
+    // 多留 1px 余量，避免整数像素取整在圆边露出发丝黑边。
+    var maxR = Math.max(0, RHO_MAX - (rPx + 1) * res);
+    if (d <= maxR + 0.5) return;
+
+    var k = d > 0 ? maxR / d : 0;
+    clamping = true;
+    view.setCenter([c[0] + gx * (k - 1), c[1] + gy * (k - 1)]);
+    clamping = false;
+  }
+
+  view.on(['change:center', 'change:resolution'], clampCenter);
+  // 动画结束（滚轮缩放等）后补一次收边，此时 setCenter 不会再打断动画
+  map.on('moveend', clampCenter);
+
+
+  /* ---------- 圆形裁剪 ----------
+     OL 10 是单画布渲染（整个地图只有 1 个 canvas），map 级 precompose 事件里
+     取不到 context，所以用 CSS 变量驱动 clip-path 直接裁画布元素：
+     变量继承到后人手一张的 canvas 上，不需要关心渲染器内部结构。
+     只裁 canvas，控件（比例尺/缩放/署名）与属性卡不受影响。 */
+  var mapEl = document.getElementById('map');
+  var ringEl = document.getElementById('ring');
+
+  function applyClip() {
+    if (!CIRCLE) {                       // 方形模式：还原
+      mapEl.style.removeProperty('--clip-r');
+      ringEl.style.display = 'none';
+      return;
+    }
+    mapEl.style.setProperty('--clip-r', CIRCLE.r + 'px');
+    mapEl.style.setProperty('--clip-cx', CIRCLE.cx + 'px');
+    mapEl.style.setProperty('--clip-cy', CIRCLE.cy + 'px');
+
+    ringEl.style.display = 'block';
+    ringEl.style.left = (CIRCLE.cx - CIRCLE.r) + 'px';
+    ringEl.style.top = (CIRCLE.cy - CIRCLE.r) + 'px';
+    ringEl.style.width = ringEl.style.height = (CIRCLE.r * 2) + 'px';
+  }
+
+  // 窗口尺寸变化：重算圆，不动视图（保留用户当前缩放）
+  var resizeTimer = 0;
+  window.addEventListener('resize', function () {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () {
+      map.updateSize();
+      updateCircle();
+      applyClip();
+      fitAntarctica();          // 尺寸变了，圆与内容需重新对齐
+
+    }, 160);
+  });
+
+  /* =========================================================
+     5. 交互：坐标读数（proj4 反算经纬度）
+     ========================================================= */
+  var outXY = document.getElementById('out-xy');
+  var outLL = document.getElementById('out-ll');
+  var outRes = document.getElementById('out-res');
+
+  function fmtNum(v) {
+    return v.toLocaleString('zh-CN', { maximumFractionDigits: 0 });
+  }
+  function dms(v, pos, neg) {
+    if (!isFinite(v)) return '—';
+    var hemi = v >= 0 ? pos : neg;
+    var a = Math.abs(v);
+    var d = Math.floor(a);
+    var m = Math.floor((a - d) * 60);
+    var s = Math.round((((a - d) * 60) - m) * 60 * 10) / 10;
+    // 秒、分进位，避免出现 60.0″
+    if (s >= 60) { s = 0; m += 1; }
+    if (m >= 60) { m = 0; d += 1; }
+    return d + '°' + String(m).padStart(2, '0') + '′' +
+           s.toFixed(1).padStart(4, '0') + '″' + hemi;
+  }
+
+  // 指针移动事件每秒可触发多种频率（触摸板/高刷屏更高），
+  // 用 rAF 合并成每帧一次，避免重复的 proj4 反算与 DOM 写入。
+  var moveRaf = 0;
+  var moveCoord = null;
+
+  function paintReadout() {
+    moveRaf = 0;
+    if (!moveCoord) return;
+    var c = moveCoord;
+    outXY.textContent = fmtNum(c[0]) + ' , ' + fmtNum(c[1]) + ' m';
+
+    var ll = proj4(PROJ, 'EPSG:4326', [c[0], c[1]]);
+    outLL.textContent = (isFinite(ll[1]) && isFinite(ll[0]))
+      ? dms(ll[1], 'N', 'S') + '  ' + dms(ll[0], 'E', 'W')
+      : '—';
+
+    outRes.textContent = fmtNum(view.getResolution()) + ' m/px';
+  }
+
+  map.on('pointermove', function (evt) {
+    if (evt.dragging) return;
+    moveCoord = evt.coordinate;
+    if (!moveRaf) moveRaf = requestAnimationFrame(paintReadout);
+  });
+
+  map.on('moveend', function () {
+    outRes.textContent = fmtNum(view.getResolution()) + ' m/px';
+  });
+  // 程序化 setResolution / fit 不触发 moveend，单独跟随
+  view.on('change:resolution', function () {
+    outRes.textContent = fmtNum(view.getResolution()) + ' m/px';
+  });
+
+  map.getViewport().addEventListener('mouseleave', function () {
+    outXY.textContent = '—';
+    outLL.textContent = '—';
+  });
+
+  /* =========================================================
+     6. 控件绑定
+     ========================================================= */
+  document.getElementById('cb-vel').addEventListener('change', function (e) {
+    velocityLayer.setVisible(e.target.checked);
+    renderLegend();
+  });
+  document.getElementById('cb-grat').addEventListener('change', function (e) {
+    gratLineLayer.setVisible(e.target.checked);
+    gratLabelLayer.setVisible(e.target.checked);
+  });
+  document.getElementById('cb-circle').addEventListener('change', function (e) {
+    antarcticCircleLayer.setVisible(e.target.checked);
+  });
+  document.getElementById('cb-station').addEventListener('change', function (e) {
+    stationLayer.setVisible(e.target.checked);
+    renderLegend();
+  });
+  document.getElementById('reset-view').addEventListener('click', fitAntarctica);
+
+  /* ---------- 矢量面板折叠：面板悬浮于地图上，折叠只收内容，不影响取景 ---------- */
+  function syncVecToggle() {
+    document.getElementById('vec-toggle').textContent =
+      vecPanelEl.classList.contains('collapsed') ? '+' : '–';
+  }
+  document.getElementById('vec-toggle').addEventListener('click', function () {
+    vecPanelEl.classList.toggle('collapsed');
+    syncVecToggle();
+  });
+  if (window.innerWidth <= 720) vecPanelEl.classList.add('collapsed');
+  syncVecToggle();
+
+  /* ---------- 矢量数据入口图标：点击悬浮于地图之上出现 / 收起，地图取景不变 ---------- */
+  document.getElementById('vec-fab').addEventListener('click', function () {
+    var open = vecPanelEl.classList.toggle('open');
+    document.getElementById('vec-fab').classList.toggle('active', open);
+  });
+
+  /* ---------- 数据统计：由站点数据实时计算 ---------- */
+  (function fillStats() {
+    var total = STATIONS.length, sum = 0, cn = 0, nations = {}, first = null, latest = null, inland = 0, kgi = 0;
+    STATIONS.forEach(function (s) {
+      if (s.s === '常年') sum++;
+      if (s.cn) cn++;
+      nations[s.ct] = 1;
+      if (!first || s.y < first.y) first = s;
+      if (!latest || s.y > latest.y) latest = s;
+      if (s.lat <= -74.5) inland++;                                   // 内陆深冰盖
+      if (s.lat > -63.4 && s.lat < -61.9 && s.lon > -59.6 && s.lon < -57.9) kgi++;  // 乔治王岛
+    });
+    function set(id, v) { document.getElementById(id).textContent = v; }
+    set('st-total', total + ' 座');
+    set('tb-count', String(total));
+    set('st-type', sum + ' 座 / ' + (total - sum) + ' 座');
+    set('st-nation', Object.keys(nations).length + ' 个');
+    set('st-cn', cn + ' 座');
+    set('st-first', first.y + ' 年 · ' + first.n);
+    set('st-latest', latest.y + ' 年 · ' + latest.n);
+    set('st-inland', inland + ' 座');
+    set('st-kgi', kgi + ' 座');
+  })();
+
+  /* ---------- 全部科考站列表卡：搜索 / 点击定位 / 下载 ---------- */
+  var stListEl = document.getElementById('station-list');
+  var stListBtn = document.getElementById('st-list-btn');
+  var listBody = document.getElementById('sl-body');
+  var listSearch = document.getElementById('sl-search');
+  var listCount = document.getElementById('sl-count');
+
+  // 站名 → 要素映射（列表行点击联动高亮与详情卡）
+  var stationByName = {};
+  stationFeatures.forEach(function (f) { stationByName[f.get('name')] = f; });
+
+  function renderStationList(kw) {
+    var kwv = (kw || '').trim().toLowerCase();
+    var html = '', shown = 0;
+    STATIONS.forEach(function (s) {
+      if (kwv && (s.n + ' ' + s.en + ' ' + s.ct).toLowerCase().indexOf(kwv) < 0) return;
+      shown++;
+      html += '<li data-name="' + s.n + '"' + (s.cn ? ' class="cn"' : '') +
+        '><span class="nm">' + s.n + '</span><span class="meta">' +
+        s.ct + ' · ' + s.y + ' · ' + s.s + '</span></li>';
+    });
+    listBody.innerHTML = html || '<li class="meta" style="cursor:default;color:#7fa8c9">无匹配站点</li>';
+    listCount.textContent = shown + ' / ' + STATIONS.length;
+  }
+  renderStationList('');
+
+  function toggleStationList(force) {
+    var open = (typeof force === 'boolean') ? force : stListEl.hidden;
+    if (open) {
+      // 与矢量面板同列：若其已展开，列表贴其下方，避免重叠
+      var top = vecPanelEl.classList.contains('open')
+        ? vecPanelEl.getBoundingClientRect().bottom + 12 : 60;
+      stListEl.style.top = Math.max(top, 60) + 'px';
+      stListEl.hidden = false;
+      stListBtn.classList.add('active');
+    } else {
+      stListEl.hidden = true;
+      stListBtn.classList.remove('active');
+    }
+  }
+  stListBtn.addEventListener('click', function () { toggleStationList(); });
+  document.getElementById('sl-close').addEventListener('click', function () { toggleStationList(false); });
+
+  listSearch.addEventListener('input', function () { renderStationList(listSearch.value); });
+
+  listBody.addEventListener('click', function (e) {
+    var li = e.target.closest('li');
+    if (!li || !li.dataset.name) return;
+    var f = stationByName[li.dataset.name];
+    if (f) { selectFeature(f); openStationCard(f); }
+  });
+
+  function downloadFile(name, text, mime) {
+    var blob = new Blob([text], { type: mime });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1500);
+  }
+  document.getElementById('sl-csv').addEventListener('click', function () {
+    var rows = [['中文名', '英文名', '国家', '建站年份', '类型', '纬度', '经度', '研究方向', '简介']];
+    STATIONS.forEach(function (s) {
+      rows.push([s.n, s.en, s.ct, s.y, s.s, s.lat, s.lon, s.r, s.note]);
+    });
+    var csv = '\uFEFF' + rows.map(function (r) {
+      return r.map(function (c) {
+        c = String(c == null ? '' : c);
+        return /[",\n]/.test(c) ? '"' + c.replace(/"/g, '""') + '"' : c;
+      }).join(',');
+    }).join('\r\n');
+    downloadFile('南极科考站列表.csv', csv, 'text/csv;charset=utf-8');
+  });
+  document.getElementById('sl-geo').addEventListener('click', function () {
+    var gj = {
+      type: 'FeatureCollection',
+      features: STATIONS.map(function (s) {
+        return {
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
+          properties: { 中文名: s.n, 英文名: s.en, 国家: s.ct, 建站年份: s.y, 类型: s.s, 研究方向: s.r, 简介: s.note }
+        };
+      })
+    };
+    downloadFile('南极科考站.geojson', JSON.stringify(gj, null, 2), 'application/geo+json');
+  });
+
+  /* ---------- 底图切换 ---------- */
+  var selBase = document.getElementById('sel-basemap');
+  selBase.innerHTML = BASEMAPS.map(function (b) {
+    return '<option value="' + b.id + '">' + b.label + '</option>';
+  }).join('');
+  selBase.addEventListener('change', function (e) { setBasemap(e.target.value); });
+
+  /* ---------- Quantarctica 数据图层 ----------
+     与 Quantarctica 桌面包中的专题数据一一对应（GIBS 同源替代，
+     EPSG:3031 原生瓦片，已验证可取；日期取南半球盛夏合成，云量最低）：
+     · Coastlines —— SCAR 南极数字数据库（ADD）海岸线矢量瓦片
+     · SSMIS_Sea_Ice_Concentration —— 海冰密集度（被动微波）
+     · MODIS_Terra_L3_NDSI_Snow_Cover_Daily —— 雪覆盖指数
+     · MODIS_Terra_L3_Ice_Surface_Temp_Daily_Day —— 海冰/地表温度
+     · AIRS_L2_Surface_Air_Temperature_Polar —— 大气地表气温
+     均为带调色板的透明 PNG，半透明叠加在底图之上。 */
+  var qaLayers = [
+    { id: 'cb-coast', l: gibsTiles(
+      { layer: 'Coastlines', set: '250m', ext: 'png', attr: '海岸线矢量 · 美国宇航局地球观测数据服务' },
+      { zIndex: 2, visible: false }) },
+    { id: 'cb-seaice', l: gibsTiles(
+      { layer: 'SSMIS_Sea_Ice_Concentration', set: '1km', ext: 'png', time: '2025-01-15', attr: '海冰密集度 · 美国宇航局地球观测数据服务' },
+      { zIndex: 2, visible: false, opacity: 0.85 }) },
+    { id: 'cb-snow', l: gibsTiles(
+      { layer: 'MODIS_Terra_L3_NDSI_Snow_Cover_Daily', set: '500m', ext: 'png', time: '2025-01-15', attr: '雪覆盖指数 · 美国宇航局地球观测数据服务' },
+      { zIndex: 2, visible: false, opacity: 0.85 }) },
+    { id: 'cb-icetemp', l: gibsTiles(
+      { layer: 'MODIS_Terra_L3_Ice_Surface_Temp_Daily_Day', set: '1km', ext: 'png', time: '2025-01-15', attr: '海冰表面温度 · 美国宇航局地球观测数据服务' },
+      { zIndex: 2, visible: false, opacity: 0.85 }) },
+    { id: 'cb-airtemp', l: gibsTiles(
+      { layer: 'AIRS_L2_Surface_Air_Temperature_Polar', set: '1km', ext: 'png', time: '2025-01-15', attr: '地表气温 · 美国宇航局地球观测数据服务' },
+      { zIndex: 2, visible: false, opacity: 0.85 }) }
+  ];
+  qaLayers.forEach(function (o) {
+    map.addLayer(o.l);
+    document.getElementById(o.id).addEventListener('change', function (e) {
+      o.l.setVisible(e.target.checked);
+      renderLegend();
+    });
+  });
+
+  /* ---------- 悬浮图例卡：跟随可见图层动态生成 ---------- */
+  var LEGEND_DEFS = [
+    { layer: velocityLayer, name: '冰流速 · 年际合成', type: 'ramp',
+      css: 'linear-gradient(90deg,#2b6ef2,#2fd7c4,#ffd23f,#ff6a2b)',
+      min: '10 米/年', max: '1500 米/年' },
+    { layer: qaLayers[0].l, name: '海岸线矢量', type: 'line' },
+    { layer: qaLayers[1].l, name: '海冰密集度 · 微波遥感', type: 'ramp',
+      css: 'linear-gradient(90deg,#1c4f8f,#6fb1e0,#dff0fa)', min: '15%', max: '100%' },
+    { layer: qaLayers[2].l, name: '雪覆盖指数', type: 'ramp',
+      css: 'linear-gradient(90deg,#3f6fb5,#a9cdf0,#f2f8fd)', min: '0%', max: '100%' },
+    { layer: qaLayers[3].l, name: '海冰表面温度 · 红外遥感', type: 'ramp',
+      css: 'linear-gradient(90deg,#22338f,#57c9e8,#fff45f)', min: '-35 °C', max: '0 °C' },
+    { layer: qaLayers[4].l, name: '地表气温 · 大气探测', type: 'ramp',
+      css: 'linear-gradient(90deg,#3d1c66,#c9427c,#ffd94a)', min: '-40 °C', max: '+10 °C' },
+    { layer: stationLayer, name: '考察站', type: 'dots' }
+  ];
+  function renderLegend() {
+    var el = document.getElementById('legend');
+    var html = '';
+    LEGEND_DEFS.forEach(function (d) {
+      if (!d.layer.getVisible()) return;
+      html += '<div class="lg-item"><div class="lg-name">' + d.name + '</div>';
+      if (d.type === 'ramp') {
+        html += '<div class="lg-bar" style="background:' + d.css + '"></div>' +
+                '<div class="lg-labels"><span>' + d.min + '</span><span>' + d.max + '</span></div>';
+      } else if (d.type === 'line') {
+        html += '<div class="lg-symbol"><span class="lg-line"></span>海岸线（矢量）</div>';
+      } else if (d.type === 'dots') {
+        html += '<div class="lg-symbol"><span class="lg-dot" style="background:#67d5ff;box-shadow:0 0 0 1.5px #0a2436"></span>各国考察站</div>' +
+                '<div class="lg-symbol"><span class="lg-dot" style="background:#ffb14e;box-shadow:0 0 0 1.5px #3a1d02"></span>中国考察站</div>';
+      }
+      html += '</div>';
+    });
+    el.innerHTML = html ? '<p class="lg-title">专题图例</p>' + html : '';
+  }
+  renderLegend();
+
+
+  /* =========================================================
+     7. 矢量数据导入（GeoJSON / KML / GPX / CSV）
+        -------------------------------------------------------
+        这里最容易错的是坐标系：南极专题数据常直接以 EPSG:3031 的
+        米制坐标给出，若当成经纬度送进投影，几百万"度"的经纬度在极射
+        投影下几乎重合，结果就是"导入了但什么都看不见"。所以流程是
+        先探测、再显式转换，探测结论写进状态栏，绝不静默猜。
+     ========================================================= */
+
+  // 保证 OL 认识这个 CRS。proj4.register 未覆盖到的自定义投影在此补注册。
+  function ensureProjection(code) {
+    if (ol.proj.get(code)) return true;
+    if (!proj4.defs(code)) return false;
+    ol.proj.addProjection(new ol.proj.Projection({
+      code: code, units: 'm', axisOrientation: 'enu'
+    }));
+    ol.proj.addCoordinateTransforms('EPSG:4326', code,
+      function (c) { return proj4('EPSG:4326', code, c).slice(0, 2); },
+      function (c) { return proj4(code, 'EPSG:4326', c).slice(0, 2); });
+    return true;
+  }
+
+  /* ---------- 样式：按几何类型分色，兼顾白色冰盖与深色海面 ---------- */
+  function geomKind(g) {
+    var t = g ? g.getType() : '';
+    return (t === 'Point' || t === 'MultiPoint') ? 'p'
+         : (t === 'LineString' || t === 'MultiLineString') ? 'l' : 'a';
+  }
+
+  var vecStyleCache = {};
+  function baseStyle(kind) {
+    if (vecStyleCache[kind]) return vecStyleCache[kind];
+
+    var st;
+    if (kind === 'p') {
+      st = new ol.style.Style({
+        image: new ol.style.Circle({
+          radius: 5,
+          fill: new ol.style.Fill({ color: '#ff2d6f' }),
+          stroke: new ol.style.Stroke({ color: 'rgba(255, 255, 255, 0.92)', width: 1.8 })
+        })
+      });
+    } else if (kind === 'l') {
+      st = new ol.style.Style({
+        stroke: new ol.style.Stroke({ color: '#ff8a1e', width: 2.1 })
+      });
+    } else {
+      st = new ol.style.Style({
+        fill: new ol.style.Fill({ color: 'rgba(255, 45, 111, 0.12)' }),
+        stroke: new ol.style.Stroke({ color: '#ff2d6f', width: 1.8 })
+      });
+    }
+    vecStyleCache[kind] = st;
+    return st;
+  }
+
+  function vecStyle(feature) { return baseStyle(geomKind(feature.getGeometry())); }
+
+  /* ---------- 选中高亮 ----------
+     底图同时存在纯白冰盖与深蓝海面，单色光晕必然在其中一种上失效
+     （实测纯白高亮在冰盖上完全看不见）。因此每层光晕都是
+     「白色主体 + 深色外描边」双色，两种底色都能拉开。
+     返回数组：[深色外圈, 白色主体]，再由调用方接上原样式。 */
+  var haloCache = {};
+  var HALO_DARK = 'rgba(6, 16, 25, 0.88)';
+  var HALO_WHITE = 'rgba(255, 255, 255, 0.95)';
+
+  function haloStyle(kind) {
+    if (haloCache[kind]) return haloCache[kind];
+    var st;
+    if (kind === 'p') {
+      /* 点要素：冰川青光环 + 白色圆心，冰盖与深海面上都醒目 */
+      st = [new ol.style.Style({
+        image: new ol.style.Circle({
+          radius: 12,
+          fill: new ol.style.Fill({ color: 'rgba(79, 216, 232, 0.28)' })
+        })
+      }), new ol.style.Style({
+        image: new ol.style.Circle({
+          radius: 8.5,
+          fill: new ol.style.Fill({ color: '#ffffff' }),
+          stroke: new ol.style.Stroke({ color: '#4fd8e8', width: 3 })
+        })
+      })];
+    } else if (kind === 'l') {
+      st = [new ol.style.Style({
+        stroke: new ol.style.Stroke({ color: HALO_DARK, width: 6.6 })
+      }), new ol.style.Style({
+        stroke: new ol.style.Stroke({ color: HALO_WHITE, width: 3.8 })
+      })];
+    } else {
+      st = [new ol.style.Style({
+        stroke: new ol.style.Stroke({ color: HALO_DARK, width: 6 })
+      }), new ol.style.Style({
+        stroke: new ol.style.Stroke({ color: HALO_WHITE, width: 3.4 }),
+        fill: new ol.style.Fill({ color: 'rgba(255, 255, 255, 0.16)' })
+      })];
+    }
+    haloCache[kind] = st;
+    return st;
+  }
+
+  var selectedFeature = null;
+  function selectFeature(f) {
+    if (selectedFeature && selectedFeature !== f) selectedFeature.setStyle(undefined);
+    selectedFeature = f;
+    if (!f) return;
+    var k = geomKind(f.getGeometry());
+    f.setStyle(haloStyle(k).concat([baseStyle(k)]));
+  }
+
+  /* ---------- 坐标系探测 ---------- */
+  function scanCoords(node, acc) {
+    if (!node || !node.length) return;
+    if (typeof node[0] === 'number') {
+      acc.n++;
+      var ax = Math.abs(node[0]), ay = Math.abs(node[1]);
+      if (ax > acc.maxAbsX) acc.maxAbsX = ax;
+      if (ay > acc.maxAbsY) acc.maxAbsY = ay;
+      return;
+    }
+    for (var i = 0; i < node.length; i++) scanCoords(node[i], acc);
+  }
+  function scanGeom(g, acc) {
+    if (!g) return;
+    if (g.getType() === 'GeometryCollection') {
+      g.getGeometries().forEach(function (x) { scanGeom(x, acc); });
+      return;
+    }
+    scanCoords(g.getCoordinates(), acc);
+  }
+  function judgeCRS(acc) {
+    if (!acc.n) return null;
+    if (acc.maxAbsX <= 180.001 && acc.maxAbsY <= 90.001) {
+      return { code: 'EPSG:4326', why: '坐标在经纬度范围内' };
+    }
+    if (acc.maxAbsX > 1e4 || acc.maxAbsY > 1e4) {
+      // 3031 与 3413 都是南极极射投影、坐标同为百万米量级，
+      // 只靠数值范围无法区分。默认取 3031，但要把这件事说出来，
+      // 否则用 3413 数据的人会得到几十公里的静默偏移。
+      return {
+        code: 'EPSG:3031',
+        why: '米制量级；3031 与 3413 无法自动区分，默认按 3031 解释'
+      };
+    }
+    return null;
+  }
+
+  /* ---------- CSV ---------- */
+  function splitLine(line, sep) {
+    var out = [], cur = '', q = false;
+    for (var i = 0; i < line.length; i++) {
+      var ch = line.charAt(i);
+      if (q) {
+        if (ch === '"') {
+          if (line.charAt(i + 1) === '"') { cur += '"'; i++; } else { q = false; }
+        } else { cur += ch; }
+      } else if (ch === '"') { q = true; }
+      else if (ch === sep) { out.push(cur); cur = ''; }
+      else { cur += ch; }
+    }
+    out.push(cur);
+    return out;
+  }
+  function readCSV(text) {
+    var rows = text.split(/\r?\n/).filter(function (l) { return l.trim() !== ''; });
+    if (rows.length < 2) throw new Error('CSV 至少需要表头 + 1 行数据');
+
+    var sep = rows[0].split(';').length > rows[0].split(',').length ? ';' : ',';
+    var head = splitLine(rows[0], sep);
+    var iLon = -1, iLat = -1;
+    for (var hi = 0; hi < head.length; hi++) {
+      var hk = head[hi].replace(/^["'\s]+|["'\s]+$/g, '').toLowerCase();
+      if (iLon < 0 && /^(lon|lng|long|longitude|经度|x|easting)$/.test(hk)) iLon = hi;
+      if (iLat < 0 && /^(lat|latitude|纬度|y|northing)$/.test(hk)) iLat = hi;
+    }
+    if (iLon < 0 || iLat < 0) {
+      throw new Error('CSV 里找不到经纬度列（需要 lon/lat 或 经度/纬度）');
+    }
+
+    var features = [];
+    for (var ri = 1; ri < rows.length; ri++) {
+      var cells = splitLine(rows[ri], sep);
+      var x = parseFloat(cells[iLon]), y = parseFloat(cells[iLat]);
+      if (!isFinite(x) || !isFinite(y)) continue;
+
+      var props = {};
+      for (var ci = 0; ci < head.length; ci++) {
+        if (ci === iLon || ci === iLat || cells[ci] === undefined) continue;
+        var key = head[ci].replace(/^["'\s]+|["'\s]+$/g, '');
+        if (key) props[key] = cells[ci].replace(/^["']|["']$/g, '');
+      }
+      props.geometry = new ol.geom.Point([x, y]);
+      features.push(new ol.Feature(props));
+
+    }
+    return { features: features };
+  }
+
+  /* ---------- 解析入口 ---------- */
+  function parseVector(text, filename, forced) {
+    var t = text.trim();
+    if (!t) throw new Error('文件内容为空');
+
+    var ext = (filename.split('.').pop() || '').toLowerCase();
+    var kind;
+    if (ext === 'kml') kind = 'KML';
+    else if (ext === 'gpx') kind = 'GPX';
+    else if (ext === 'csv') kind = 'CSV';
+    else if (t.charAt(0) === '<') kind = /<gpx[\s>]/i.test(t) ? 'GPX' : 'KML';
+    else if (t.charAt(0) === '{' || t.charAt(0) === '[') kind = 'GeoJSON';
+    else kind = 'CSV';
+
+    var features;
+
+    if (kind === 'CSV') {
+      features = readCSV(t).features;
+    } else if (kind === 'GeoJSON') {
+      var obj;
+      try { obj = JSON.parse(t); }
+      catch (e) { throw new Error('GeoJSON 语法错误：' + e.message); }
+      if (obj && obj.type === 'Topology') {
+        throw new Error('这是 TopoJSON，需先转成 GeoJSON（mapshaper / ogr2ogr）');
+      }
+      features = new ol.format.GeoJSON().readFeatures(obj, {
+        dataProjection: 'EPSG:4326', featureProjection: 'EPSG:4326'
+      });
+    } else {
+      var fmt = kind === 'KML'
+        ? new ol.format.KML({ extractStyles: false, showPointNames: false })
+        : new ol.format.GPX();
+      features = fmt.readFeatures(t, {
+        dataProjection: 'EPSG:4326', featureProjection: 'EPSG:4326'
+      });
+    }
+
+    if (!features.length) throw new Error('文件里没有解析出任何要素');
+
+    // 统一扫描几何坐标的量级，供坐标系判断使用（所有来源走同一条路径）
+    var acc = { maxAbsX: 0, maxAbsY: 0, n: 0 };
+    features.forEach(function (f) { scanGeom(f.getGeometry(), acc); });
+
+    // 源坐标系：手动指定优先，否则按坐标量级判断
+    var src;
+    if (kind === 'KML' || kind === 'GPX') {
+      // KML / GPX 规范固定为 WGS84，解析时已按经纬度读入。
+      // 若此处再采信"手动指定"的米制投影，会对同一份坐标做两次变换。
+      src = {
+        code: 'EPSG:4326',
+        why: (forced && forced !== 'auto' && forced !== 'EPSG:4326')
+          ? 'KML/GPX 规范固定 WGS84，已忽略手动指定'
+          : 'KML/GPX 规范固定 WGS84'
+      };
+    } else if (forced && forced !== 'auto') {
+      src = { code: forced, why: '手动指定' };
+    } else {
+      src = judgeCRS(acc);
+      if (!src) {
+        throw new Error('无法判断源坐标系（坐标量级 ' + Math.round(acc.maxAbsX) +
+                        '），请在"源坐标系"里手动指定');
+      }
+    }
+    if (!ensureProjection(src.code)) {
+      throw new Error('源坐标系 ' + src.code + ' 未定义，无法转换');
+    }
+
+    // 统一转到 EPSG:3031
+    var good = [], bad = 0;
+    features.forEach(function (f) {
+      var g = f.getGeometry();
+      if (!g) { bad++; return; }
+      if (src.code !== PROJ) g.transform(src.code, PROJ);
+      var e = g.getExtent();
+      for (var i = 0; i < 4; i++) {
+        if (!isFinite(e[i])) { bad++; return; }
+      }
+      good.push(f);
+    });
+    if (!good.length) throw new Error('坐标转换后没有有效几何，请检查源坐标系');
+
+    // 完全落在南极投影范围外的要素仍保留，但要让人知道
+    var outside = 0;
+    good.forEach(function (f) {
+      if (!ol.extent.intersects(f.getGeometry().getExtent(), EXTENT)) outside++;
+    });
+
+    return { features: good, src: src, outside: outside, dropped: bad };
+  }
+
+  /* ---------- 图层管理 ---------- */
+  var vecLayers = [];
+  var vecZ = 10;
+  var listEl = document.getElementById('layer-list');
+  var statusEl = document.getElementById('vec-status');
+  var dropEl = document.getElementById('drop');
+  var fileEl = document.getElementById('file-input');
+  var projSel = document.getElementById('src-proj');
+
+  function setStatus(msg, isError) {
+    statusEl.textContent = msg || '';
+    statusEl.className = isError ? 'err' : '';
+  }
+
+  var ICON_FIT =
+    '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.8" stroke-linecap="round"><path d="M6 2H2v4M10 2h4v4M6 14H2v-4M10 14h4v-4"/></svg>';
+  var ICON_DEL =
+    '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.9" stroke-linecap="round"><path d="M3.6 3.6l8.8 8.8M12.4 3.6l-8.8 8.8"/></svg>';
+
+  function miniBtn(icon, tip, fn) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'mini';
+    b.innerHTML = icon;
+    b.title = tip;
+    b.addEventListener('click', function (ev) { ev.stopPropagation(); fn(); });
+    return b;
+  }
+
+  function renderLayerList() {
+    listEl.textContent = '';
+    if (!vecLayers.length) {
+      var e = document.createElement('li');
+      e.className = 'empty';
+      e.textContent = '尚未载入矢量数据';
+      listEl.appendChild(e);
+      return;
+    }
+    vecLayers.forEach(function (item) {
+      var li = document.createElement('li');
+
+      var lb = document.createElement('label');
+      lb.className = 'row tight';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = item.layer.getVisible();
+      cb.addEventListener('change', function () { item.layer.setVisible(cb.checked); });
+      var nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = item.name;
+      nm.title = item.name;
+      lb.appendChild(cb);
+      lb.appendChild(nm);
+
+      var cnt = document.createElement('span');
+      cnt.className = 'cnt';
+      cnt.textContent = item.count;
+      cnt.title = item.count + ' 个要素';
+
+      li.appendChild(lb);
+      li.appendChild(cnt);
+      li.appendChild(miniBtn(ICON_FIT, '缩放至该图层', function () { zoomToItems([item]); }));
+      li.appendChild(miniBtn(ICON_DEL, '移除该图层', function () { removeItem(item); }));
+      listEl.appendChild(li);
+    });
+  }
+
+  function shortName(name) {
+    return name.replace(/\.[^.]+$/, '') || name;
+  }
+
+  function addVectorData(features, name) {
+    var layer = new ol.layer.Vector({
+      zIndex: vecZ++,
+      source: new ol.source.Vector({ features: features, wrapX: false }),
+      style: vecStyle
+    });
+    map.addLayer(layer);
+    var item = { layer: layer, name: shortName(name), count: features.length };
+    vecLayers.push(item);
+    renderLayerList();
+    return item;
+  }
+
+  function removeItem(item) {
+    var i = vecLayers.indexOf(item);
+    if (i >= 0) vecLayers.splice(i, 1);
+    map.removeLayer(item.layer);
+    item.layer.getSource().clear();
+    if (selectedFeature && selectedFeature.getLayer() === item.layer) selectFeature(null);
+    closePopup();
+    renderLayerList();
+    setStatus('已移除 ' + item.name, false);
+  }
+
+  function zoomToItems(items) {
+    var ext = null;
+    items.forEach(function (it) {
+      var e = it.layer.getSource().getExtent();
+      if (!e) return;
+      ext = ext ? ol.extent.extend(ext, e) : e.slice();
+    });
+    if (!ext) return;
+
+    // 注意：OL 10 的交集函数名是 getIntersection（不是 intersection）
+    var box = ol.extent.getIntersection(ext, EXTENT, []);
+    if (!box) { setStatus('数据范围完全在南极投影范围之外', true); return; }
+
+    // 单点或极小范围：给个 20 km 的下限，否则一下顶到最大级别
+    var MIN_SPAN = 20000;
+    if (box[2] - box[0] < MIN_SPAN) {
+      var cx = (box[0] + box[2]) / 2;
+      box[0] = cx - MIN_SPAN / 2; box[2] = cx + MIN_SPAN / 2;
+    }
+    if (box[3] - box[1] < MIN_SPAN) {
+      var cy = (box[1] + box[3]) / 2;
+      box[1] = cy - MIN_SPAN / 2; box[3] = cy + MIN_SPAN / 2;
+    }
+
+    // 用圆形版式的实际 padding，否则 fit 出来的内容中心会偏离圆心
+    var pad = CIRCLE
+      ? [CIRCLE.pad.t, CIRCLE.pad.r, CIRCLE.pad.b, CIRCLE.pad.l]
+      : (window.innerWidth > 720 ? [44, 16, 56, 306] : [72, 12, 96, 12]);
+    view.fit(box, { size: map.getSize(), padding: pad, maxZoom: MAX_Z, duration: 480 });
+  }
+
+  /* ---------- 文件读取 ---------- */
+  function decode(buf) {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+    } catch (e) {
+      // 国内数据常见 GBK 编码，UTF-8 解不开时回退
+      return new TextDecoder('gbk').decode(buf);
+    }
+  }
+
+  function loadFile(file) {
+    var read = file.arrayBuffer ? file.arrayBuffer() : Promise.reject(new Error('浏览器不支持读取本地文件'));
+    return read.then(function (buf) {
+      var r = parseVector(decode(buf), file.name, projSel.value);
+      var item = addVectorData(r.features, file.name);
+      return { item: item, src: r.src, outside: r.outside };
+    });
+  }
+
+  function handleFiles(fileList) {
+    var files = Array.prototype.slice.call(fileList || []);
+    if (!files.length) return;
+    setStatus('正在解析 ' + files.length + ' 个文件…', false);
+
+    var done = [], errs = [];
+    var chain = Promise.resolve();
+    files.forEach(function (f) {
+      chain = chain.then(function () {
+        return loadFile(f)
+          .then(function (r) { done.push(r); })
+          .catch(function (e) {
+            errs.push(f.name + '：' + (e && e.message ? e.message : String(e)));
+          });
+      });
+    });
+
+    chain.then(function () {
+      var lines = [];
+      if (done.length) {
+        var total = done.reduce(function (a, r) { return a + r.item.count; }, 0);
+        var outside = done.reduce(function (a, r) { return a + r.outside; }, 0);
+        // 多文件可能来自不同 CRS，只报最后一个会误导
+        var codes = {};
+        done.forEach(function (r) { codes[r.src.code] = true; });
+        var codeList = Object.keys(codes);
+        var srcText = codeList.length === 1
+          ? codeList[0] + '（' + done[0].src.why + '）'
+          : '混合 ' + codeList.join(' / ');
+        lines.push('已载入 ' + done.length + ' 个文件 / ' + total +
+                   ' 个要素 · 源坐标 ' + srcText);
+        if (outside) lines.push(outside + ' 个要素在南极范围外，已隐藏');
+      }
+      errs.forEach(function (m) { lines.push('✕ ' + m); });
+
+      setStatus(lines.join('；'), errs.length > 0 && !done.length);
+      if (errs.length && done.length) statusEl.className = 'err';
+
+      if (done.length) {
+        zoomToItems(done.map(function (r) { return r.item; }));
+      }
+    });
+  }
+
+  /* ---------- 属性卡 ---------- */
+  var vecPopup = new ol.Overlay({
+    element: document.getElementById('pp-wrap'),
+    positioning: 'bottom-left',
+    offset: [12, -12],
+    stopEvent: true
+  });
+  vecPopup.setPosition(undefined);
+  map.addOverlay(vecPopup);
+
+  var ppTitle = document.getElementById('pp-title');
+  var ppBody = document.getElementById('pp-body');
+
+  function closePopup() { vecPopup.setPosition(undefined); }
+
+  function appendPropRow(k, v) {
+    var tr = document.createElement('tr');
+    var a = document.createElement('td');
+    a.className = 'k';
+    a.textContent = k;
+    a.title = k;
+    var b = document.createElement('td');
+    b.className = 'v';
+    b.textContent = v;
+    tr.appendChild(a);
+    tr.appendChild(b);
+    ppBody.appendChild(tr);
+  }
+
+  function appendLonLat(label, xy) {
+    var ll = proj4(PROJ, 'EPSG:4326', [xy[0], xy[1]]);
+    if (!isFinite(ll[0]) || !isFinite(ll[1])) return;
+    appendPropRow(label, dms(ll[1], 'N', 'S') + '  ' + dms(ll[0], 'E', 'W'));
+  }
+
+  function showPopup(feature, layerName) {
+    ppTitle.textContent = layerName;
+    ppBody.textContent = '';
+
+    var g = feature.getGeometry();
+    appendPropRow('几何', g ? g.getType() : '—');
+
+    // 用要素自身的坐标，而不是鼠标落点 —— 点在要素边缘时两者能差几十公里
+    if (g && g.getType() === 'Point') {
+      appendLonLat('坐标', g.getCoordinates());
+    } else if (g) {
+      var e = g.getExtent();
+      appendLonLat('中心', [(e[0] + e[2]) / 2, (e[1] + e[3]) / 2]);
+      appendPropRow('范围', fmtNum(e[2] - e[0]) + ' × ' + fmtNum(e[3] - e[1]) + ' m');
+    }
+
+    // 内置数据的属性键映射为中文标签，与导入数据的原始键名共存
+    var KEY_LABELS = {
+      name: '名称', en: '英文名', country: '运营国',
+      year: '建站年份', status: '类型', research: '研究方向', note: '简介'
+    };
+    var props = feature.getProperties();
+    var keys = Object.keys(props).filter(function (k) { return k !== 'geometry' && k !== 'cn'; });
+    // 「简介」压轴，其余保持写入顺序
+    keys.sort(function (a, b) {
+      if (a === 'note') return 1;
+      if (b === 'note') return -1;
+      return 0;
+    });
+    var shown = 0;
+    for (var i = 0; i < keys.length && shown < 12; i++) {
+      var v = props[keys[i]];
+      if (v === null || v === undefined || v === '') continue;
+      if (typeof v === 'object') {
+        try { v = JSON.stringify(v); } catch (e) { v = '[对象]'; }
+      }
+      appendPropRow(KEY_LABELS[keys[i]] || keys[i], String(v));
+      shown++;
+    }
+    if (!keys.length) appendPropRow('属性', '（无，仅几何）');
+    else if (keys.length > shown) appendPropRow('…', '另有 ' + (keys.length - shown) + ' 个属性');
+  }
+
+  /* ---------- 考察站详情卡（右侧） ---------- */
+  function openStationCard(f) {
+    var g = f.getGeometry();
+    var coord = (g && g.getType() === 'Point') ? g.getCoordinates() : null;
+    document.getElementById('sc-name').textContent = f.get('name') || '—';
+    document.getElementById('sc-en').textContent = f.get('en') || '';
+    document.getElementById('sc-country').textContent = f.get('country') || '—';
+    document.getElementById('sc-year').textContent = f.get('year') || '—';
+    document.getElementById('sc-status').textContent = f.get('status') || '—';
+    document.getElementById('sc-research').textContent = f.get('research') || '—';
+    document.getElementById('sc-note').textContent = f.get('note') || '';
+    if (coord) {
+      var ll = ol.proj.toLonLat(coord, PROJ);
+      document.getElementById('sc-coord').textContent =
+        dms(ll[1], 'N', 'S') + '  ' + dms(ll[0], 'E', 'W');
+    } else {
+      document.getElementById('sc-coord').textContent = '';
+    }
+
+    /* 动态安放：桌面端在矢量面板下方、图例上方；窄屏在矢量面板上方、读数条下方 */
+    var card = document.getElementById('station-card');
+    var lgEl = document.getElementById('legend');
+    lgEl.style.visibility = '';
+    if (window.innerWidth <= 720) {
+      var vpM = document.getElementById('vecpanel').getBoundingClientRect();
+      var roM = document.getElementById('readout').getBoundingClientRect();
+      card.style.top = 'auto';
+      card.style.bottom = (window.innerHeight - vpM.top + 12) + 'px';
+      card.style.maxHeight = Math.max(160, vpM.top - roM.bottom - 20) + 'px';
+      lgEl.style.visibility = 'hidden';   // 空间不够时暂时收起图例
+    } else {
+      var vpEl = document.getElementById('vecpanel');
+      var topD;
+      if (vpEl.classList.contains('open')) {
+        topD = vpEl.getBoundingClientRect().bottom + 12;
+      } else {
+        topD = 108;   // 面板未展开：统计卡下方
+      }
+      topD = Math.max(topD, 108);
+      var lgD = lgEl.getBoundingClientRect();
+      var bottomLimit = (lgD.height > 0) ? lgD.top : window.innerHeight - 48;
+      card.style.bottom = '';
+      card.style.top = topD + 'px';
+      card.style.maxHeight = Math.max(180, bottomLimit - topD - 12) + 'px';
+    }
+    card.hidden = false;
+  }
+  function closeStationCard() {
+    document.getElementById('station-card').hidden = true;
+    document.getElementById('legend').style.visibility = '';
+  }
+  document.getElementById('sc-close').addEventListener('click', function () {
+    closeStationCard();
+    selectFeature(null);
+  });
+
+  map.on('singleclick', function (evt) {
+    var hit = null;
+    map.forEachFeatureAtPixel(evt.pixel, function (f, l) {
+      if (l === stationLayer) {           // 内置考察站：点击弹出详情卡
+        hit = { f: f, name: '考察站', station: true };
+        return true;
+      }
+      for (var i = 0; i < vecLayers.length; i++) {
+        if (vecLayers[i].layer === l) {
+          hit = { f: f, name: vecLayers[i].name };
+          return true;
+        }
+      }
+      return false;
+    }, { hitTolerance: 5 });
+
+    if (!hit) { closePopup(); closeStationCard(); selectFeature(null); return; }
+    selectFeature(hit.f);
+
+    if (hit.station) {                    // 考察站 → 右侧详情卡
+      closePopup();
+      openStationCard(hit.f);
+      return;
+    }
+    closeStationCard();
+
+    // 靠近右边缘时让卡片向左展开，否则会溢出视口
+    var vw = map.getSize()[0];
+    var flip = evt.pixel[0] > vw * 0.62;
+    vecPopup.setPositioning(flip ? 'bottom-right' : 'bottom-left');
+    vecPopup.setOffset(flip ? [-12, -12] : [12, -12]);
+
+    showPopup(hit.f, hit.name);
+    vecPopup.setPosition(evt.coordinate);
+  });
+
+  document.getElementById('pp-close').addEventListener('click', closePopup);
+
+  /* ---------- 事件绑定 ---------- */
+  dropEl.addEventListener('click', function () { fileEl.click(); });
+  fileEl.addEventListener('change', function () {
+    handleFiles(fileEl.files);
+    fileEl.value = '';        // 允许重复选择同一个文件
+  });
+
+  document.addEventListener('dragover', function (e) {
+    if (!e.dataTransfer) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    dropEl.classList.add('over');
+  });
+  document.addEventListener('dragleave', function (e) {
+    if (!e.relatedTarget) dropEl.classList.remove('over');
+  });
+  document.addEventListener('drop', function (e) {
+    e.preventDefault();
+    dropEl.classList.remove('over');
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+      handleFiles(e.dataTransfer.files);
+    }
+  });
+
+  renderLayerList();
+
+  /* ---------- 窄屏面板折叠：初始收起，点标题切换 ---------- */
+  var panelEl = document.getElementById('panel');
+  function isNarrow() { return window.innerWidth <= 720; }
+  if (isNarrow()) panelEl.classList.add('collapsed');
+  panelEl.querySelector('h1').addEventListener('click', function () {
+    if (!isNarrow()) return;
+    panelEl.classList.toggle('collapsed');
+  });
+
+  /* =========================================================
+     8. 首屏加载提示
+     ========================================================= */
+  var loader = document.getElementById('loader');
+  function hideLoader() { loader.classList.add('hide'); }
+  map.once('rendercomplete', hideLoader);
+  setTimeout(hideLoader, 8000);   // 兜底，避免异常时提示一直挂着
+})();
+</script>
+</body>
+</html>
