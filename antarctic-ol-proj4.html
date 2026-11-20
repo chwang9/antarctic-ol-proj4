@@ -2460,10 +2460,52 @@
   }
 
   var selectedFeature = null;
+
+  /* 科考站选中样式：光晕衬在下方，原站点圆点与站名标签原样保留 */
+  function stationSelectedStyle(f) {
+    var cn = f.get('cn');
+    return [
+      new ol.style.Style({
+        image: new ol.style.Circle({
+          radius: 15,
+          fill: new ol.style.Fill({ color: 'rgba(79, 216, 232, 0.22)' }),
+          stroke: new ol.style.Stroke({ color: 'rgba(79, 216, 232, 0.9)', width: 2 })
+        })
+      }),
+      new ol.style.Style({
+        image: new ol.style.Circle({
+          radius: cn ? 9.5 : 8.2,
+          fill: new ol.style.Fill({ color: 'rgba(6, 16, 25, 0.45)' }),
+          stroke: new ol.style.Stroke({ color: 'rgba(255, 255, 255, 0.95)', width: 2.5 })
+        })
+      }),
+      new ol.style.Style({
+        image: new ol.style.Circle({
+          radius: cn ? 5.5 : 4.2,
+          fill: new ol.style.Fill({ color: cn ? '#ff6a3d' : '#8fe6ff' }),
+          stroke: new ol.style.Stroke({ color: 'rgba(3, 14, 22, 0.9)', width: 1.5 })
+        }),
+        text: new ol.style.Text({
+          text: f.get('name'),
+          font: '500 11.5px "Segoe UI", "Microsoft YaHei", sans-serif',
+          fill: new ol.style.Fill({ color: cn ? '#ffe8dd' : '#e7f5ff' }),
+          stroke: new ol.style.Stroke({ color: 'rgba(3, 14, 22, 0.88)', width: 3 }),
+          offsetY: -13,
+          padding: [3, 6, 3, 6]
+        })
+      })
+    ];
+  }
+
   function selectFeature(f) {
     if (selectedFeature && selectedFeature !== f) selectedFeature.setStyle(undefined);
     selectedFeature = f;
     if (!f) return;
+    // 站点要素：光晕 + 原样式组合（原点与站名不消失）；其余矢量要素走通用高亮
+    if (stationByName[f.get('name')] === f) {
+      f.setStyle(stationSelectedStyle(f));
+      return;
+    }
     var k = geomKind(f.getGeometry());
     f.setStyle(haloStyle(k).concat([baseStyle(k)]));
   }
